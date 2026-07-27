@@ -1,0 +1,55 @@
+# Recordings and tracking exports. These are unpublished experiment data and
+# some run to tens of megabytes, so they stay local. Use "git add -f" if you
+# ever deliberately want to commit one.
+*.csv
+*.slp
+*.h5
+*.hdf5
+*.pkl
+*.mp4
+*.avi
+*.mov
+*.mkv
+
+# Frames pulled out of the recordings, and anything the review script renders
+modelTongueSample*.PNG
+modelTongueSample*.png
+review_*.png
+*_diagnostics.png
+
+# Script output
+*_anticipatory_licks.csv
+*_anticipatory_bouts.csv
+*_lick_bouts.csv
+*_trials.csv
+*_frames_annotated.csv
+combined_session_summary.csv
+scratch*/
+out/
+output/
+results/
+
+# Credentials and local settings
+.env
+.env.*
+*.pem
+*.key
+credentials.json
+token.json
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+.pytest_cache/
+.ipynb_checkpoints/
+*.egg-info/
+
+# Editors and OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini

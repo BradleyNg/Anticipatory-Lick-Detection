@@ -80,6 +80,8 @@ DEFAULTS = dict(
     extension_merge_gap=30,   # bridge extended runs <= this many frames apart (CLOSE)
     lick_episode_gap=120,     # licks <= this many frames apart are one licking episode (2s)
     anticipatory_max_gap=120, # max gap from last lick to the extension onset to count as lead-in
+    post_reward_s=2.0,        # licking within this long after a retraction is reward clean-up,
+                              # not anticipation. Set to 0 to count it as anticipatory.
     min_extended_frac=0.002,  # an extended region must hold >= this frac of spout points
     min_extension_s=None,     # optional: drop extensions shorter than this many seconds
     max_extension_s=None,     # optional: drop extensions longer than this many seconds
@@ -443,6 +445,9 @@ class Protrusion:
     offset_frame: int
     n_frames: int
     max_score: float
+    leads_into_reward: bool = False   # part of the run that builds straight into the extension
+    isolated: bool = False            # the only lick in its bout
+    s_to_extension: float = float("nan")   # seconds until this trial's extension
 
 
 @dataclass
@@ -454,6 +459,7 @@ class Bout:
     end_frame: int
     n_licks: int
     n_tongue_frames: int
+    leads_into_reward: bool = False
     mean_spout_disp: float = 0.0
     mean_tongue_score: float = 0.0
     tongue_x: float = 0.0
@@ -489,40 +495,121 @@ def derive_anticipatory_windows(valid: np.ndarray, trials, cfg: dict, accepted=N
     return windows
 
 
-def label_licks(n: int, trials, windows, accepted=None):
-    """Per-frame three-way label + trial id.
+def label_licks(n: int, trials, windows, cfg, accepted=None):
+    """Per-frame label, trial id, and a lead-in flag.
 
-    consummatory = inside an accepted extension; anticipatory = inside a pre-extension window;
-    everything else = 'other'. Licking inside a *rejected* extension (edge-of-recording or
-    off-protocol duration) is 'other', not consummatory -- it is not a reward lick.
+    A lick is ANTICIPATORY whenever the spout is retracted during the active session and the
+    mouse is not just finishing a reward. It does NOT have to be part of an established run of
+    licking -- the mouse often makes a single isolated lick between trials, and that is still a
+    lick made with no reward available, so it counts.
+
+    The lead-in runs found by `derive_anticipatory_windows` are therefore no longer used to
+    *include* licks. They only set the `leads_into_reward` flag, so a run that builds straight
+    into an extension can still be told apart from a lone spontaneous lick downstream.
+
+      consummatory  inside an accepted extension
+      post_reward   within `post_reward_s` of an extension ending (finishing the reward,
+                    so not anticipation). Set --post-reward-s 0 to fold these in.
+      anticipatory  spout retracted, inside the active session, everything else
+      other         outside the active session, or inside a rejected extension
+
+    Returns (labels, trial_id, leads_into_reward).
     """
     labels = np.array(["other"] * n, dtype=object)
     trial_id = np.zeros(n, dtype=int)
-    for ti, (s, e) in enumerate(trials, start=1):
-        if accepted is not None and not accepted[ti - 1]:
-            continue
+    lead = np.zeros(n, dtype=bool)
+    if accepted is None:
+        accepted = [True] * len(trials)
+
+    acc = [(i + 1, s, e) for i, (s, e) in enumerate(trials) if accepted[i]]
+    if not acc:
+        return labels, trial_id, lead
+
+    pr = int(round(cfg["post_reward_s"] * cfg["fps"]))
+    fps = cfg["fps"]
+    first_s = acc[0][1]
+    last_e = acc[-1][2]
+
+    # Session start. Before the first reward the mouse is already working for one, so that
+    # licking counts. The one thing to stay clear of is the mount-up period at the head of the
+    # recording, which shows up as a rejected extension (the spout parked out) before the first
+    # real trial, so start just after the last of those. Session end is the last reward plus the
+    # post-reward window, since after that we cannot tell a running session from the mouse being
+    # taken off.
+    lo = 0
+    for i, (s, e) in enumerate(trials):
+        if not accepted[i] and e <= first_s:
+            lo = max(lo, e)
+    hi = min(n, last_e + max(pr, 1))
+    if cfg.get("trim_start_s") is not None:
+        lo = max(lo, int(round(cfg["trim_start_s"] * fps)))
+    if cfg.get("trim_end_s") is not None:
+        hi = min(hi, n - int(round(cfg["trim_end_s"] * fps)))
+
+    # Everything inside the session with the spout retracted starts out anticipatory, and is
+    # attributed to the next extension it precedes.
+    prev_end = lo
+    for ti, s, e in acc:
+        if prev_end < s:
+            labels[prev_end:s] = "anticipatory"
+            trial_id[prev_end:s] = ti
         labels[s:e] = "consummatory"
         trial_id[s:e] = ti
+        prev_end = e
+    # Licking after the final extension, out to the end of the session window.
+    if last_e < hi:
+        labels[last_e:hi] = "anticipatory"
+        trial_id[last_e:hi] = acc[-1][0]
+    labels[:lo] = "other"
+    trial_id[:lo] = 0
+
+    # Flag the licking that runs straight into an extension. Done before the post-reward carve
+    # so that a lead-in beats it -- when trials come close together the tail of one reward and
+    # the run into the next can overlap, and the run into the next is what matters.
     for ti, w in enumerate(windows, start=1):
-        if w is None:
+        if w is None or not accepted[ti - 1]:
             continue
         a, b = w
-        seg = labels[a:b]
-        mask = (seg == "other")          # never overwrite a consummatory frame
-        seg[mask] = "anticipatory"
-        trial_id[a:b][mask] = ti
-    return labels, trial_id
+        lead[a:b] = labels[a:b] == "anticipatory"
+
+    # Reward clean-up licking is not anticipation, so carve it back out.
+    if pr > 0:
+        for ti, s, e in acc:
+            stop = min(e + pr, n)
+            seg = labels[e:stop]
+            mask = (seg == "anticipatory") & ~lead[e:stop]
+            seg[mask] = "post_reward"
+            trial_id[e:stop][mask] = ti
+
+    # A rejected extension still had the spout out, so its frames are not anticipatory.
+    for i, (s, e) in enumerate(trials):
+        if not accepted[i]:
+            labels[s:e] = "other"
+            trial_id[s:e] = 0
+            lead[s:e] = False
+    return labels, trial_id, lead
 
 
 def extract_protrusions_and_bouts(df: pd.DataFrame, valid: np.ndarray, labels, trial_id,
-                                  reg: SpoutRegions, cfg: dict):
+                                  reg: SpoutRegions, cfg: dict, lead=None, trials=None,
+                                  accepted=None):
     """Split clean tongue frames into individual protrusions, then merge protrusions into
     single-class bouts. A protrusion/bout never spans two labels or two trials, so licking
-    that crosses an extension onset is split exactly at the onset."""
+    that crosses an extension onset is split exactly at the onset.
+
+    Every protrusion is reported, including one that sits entirely on its own. Bout membership
+    is descriptive (`n_licks`, `isolated`), never a filter -- a lone lick is a bout of one.
+    """
     frames = df["frame_idx"].to_numpy()
     idx = np.where(valid)[0]
     if len(idx) == 0:
         return [], []
+    if lead is None:
+        lead = np.zeros(len(labels), dtype=bool)
+    onset_of = {}
+    if trials is not None:
+        acc = accepted if accepted is not None else [True] * len(trials)
+        onset_of = {i + 1: s for i, (s, _) in enumerate(trials) if acc[i]}
 
     tx = df["tongue.x"].to_numpy(float)
     ty = df["tongue.y"].to_numpy(float)
@@ -566,6 +653,7 @@ def extract_protrusions_and_bouts(df: pd.DataFrame, valid: np.ndarray, labels, t
             end_frame=int(frames[i1]),
             n_licks=len(groups),
             n_tongue_frames=int(len(allf)),
+            leads_into_reward=bool(lead[allf].any()),
             mean_spout_disp=(round(float(np.nanmean(disp)), 1)
                              if np.isfinite(disp).any() else float("nan")),
             mean_tongue_score=round(float(np.nanmean(ts[allf])), 3),
@@ -575,9 +663,13 @@ def extract_protrusions_and_bouts(df: pd.DataFrame, valid: np.ndarray, labels, t
         for g in groups:
             pid += 1
             peak = g[int(np.nanargmax(ts[g]))]
+            tid = int(trial_id[g[0]])
+            onset = onset_of.get(tid)
+            gap = ((onset - g[0]) / cfg["fps"]) if (onset is not None and onset > g[0]) \
+                else float("nan")
             out_prots.append(Protrusion(
                 protrusion_id=pid,
-                trial_id=int(trial_id[g[0]]),
+                trial_id=tid,
                 bout_id=bid,
                 label=str(labels[g[0]]),
                 onset_frame=int(frames[g[0]]),
@@ -585,6 +677,9 @@ def extract_protrusions_and_bouts(df: pd.DataFrame, valid: np.ndarray, labels, t
                 offset_frame=int(frames[g[-1]]),
                 n_frames=int(len(g)),
                 max_score=round(float(np.nanmax(ts[g])), 3),
+                leads_into_reward=bool(lead[g].any()),
+                isolated=bool(len(groups) == 1),
+                s_to_extension=round(gap, 3) if gap == gap else float("nan"),
             ))
     return out_prots, out_bouts
 
@@ -606,8 +701,8 @@ def bouts_to_frame(bouts, fps: float, offset_ms: float | None) -> pd.DataFrame:
             row["end_rig_ms"] = round(end_s * 1000.0 + offset_ms, 1)
         rows.append(row)
     cols = ["bout_id", "trial_id", "classification", "start_frame", "end_frame",
-            "start_s", "end_s", "duration_s", "n_licks", "n_tongue_frames",
-            "mean_spout_disp", "mean_tongue_score", "tongue_x", "tongue_y"]
+            "start_s", "end_s", "duration_s", "n_licks", "leads_into_reward",
+            "n_tongue_frames", "mean_spout_disp", "mean_tongue_score", "tongue_x", "tongue_y"]
     if offset_ms is not None:
         cols += ["start_rig_ms", "end_rig_ms"]
     df = pd.DataFrame(rows)
@@ -627,7 +722,8 @@ def protrusions_to_frame(prots, fps: float, offset_ms: float | None) -> pd.DataF
             row["onset_rig_ms"] = round(p.onset_frame / fps * 1000.0 + offset_ms, 1)
         rows.append(row)
     cols = ["protrusion_id", "trial_id", "bout_id", "label", "onset_frame", "peak_frame",
-            "offset_frame", "onset_s", "peak_s", "duration_s", "n_frames", "max_score"]
+            "offset_frame", "onset_s", "peak_s", "duration_s", "n_frames", "max_score",
+            "leads_into_reward", "isolated", "s_to_extension"]
     if offset_ms is not None:
         cols += ["onset_rig_ms"]
     df = pd.DataFrame(rows)
@@ -683,6 +779,7 @@ def summarize(stem, reg, bouts_df, state, trials, windows):
         n_bouts=int(len(bouts_df)),
         n_anticipatory=n("anticipatory"),
         n_consummatory=n("consummatory"),
+        n_post_reward=n("post_reward"),
         n_other=n("other"),
         frac_frames_spout_extended=round(float(np.mean(state.to_numpy() == "extended")), 4),
         spout_region_separation_px=round(reg.separation, 1),
@@ -783,8 +880,9 @@ def process_one(csv_path: str, args, cfg: dict, out_dir: str) -> dict:
     if args.keep_all_trials:
         accepted = [True] * len(trials)
     windows = derive_anticipatory_windows(valid, trials, cfg, accepted)
-    labels, trial_id = label_licks(len(df), trials, windows, accepted)
-    prots, bouts = extract_protrusions_and_bouts(df, valid, labels, trial_id, reg, cfg)
+    labels, trial_id, lead = label_licks(len(df), trials, windows, cfg, accepted)
+    prots, bouts = extract_protrusions_and_bouts(df, valid, labels, trial_id, reg, cfg,
+                                                 lead, trials, accepted)
 
     bouts_df = bouts_to_frame(bouts, cfg["fps"], args.video_rig_offset_ms)
     prots_df = protrusions_to_frame(prots, cfg["fps"], args.video_rig_offset_ms)
@@ -808,9 +906,19 @@ def process_one(csv_path: str, args, cfg: dict, out_dir: str) -> dict:
             print(f"        trial {ti} at t={t0:.1f}s -- {why}")
         print("        (their licks are labelled 'other'; use --keep-all-trials to include them)")
     counts = {c: int((bouts_df["classification"] == c).sum()) if len(bouts_df) else 0
-              for c in ("anticipatory", "consummatory", "other")}
+              for c in ("anticipatory", "consummatory", "post_reward", "other")}
     print(f"  bouts: {len(bouts_df)} total -> {counts['anticipatory']} anticipatory, "
-          f"{counts['consummatory']} consummatory, {counts['other']} other")
+          f"{counts['consummatory']} consummatory, {counts['post_reward']} post-reward, "
+          f"{counts['other']} other")
+    if len(prots_df):
+        ap = prots_df[prots_df["label"] == "anticipatory"]
+        if len(ap):
+            lead_n = int(ap["leads_into_reward"].sum())
+            spont = ap[~ap["leads_into_reward"].astype(bool)]
+            solo = int(spont["isolated"].sum())
+            print(f"  anticipatory licks: {len(ap)} total -> {lead_n} in a run leading into a "
+                  f"reward, {len(spont)} spontaneous between trials "
+                  f"({solo} of those a lone single lick)")
 
     # --- write outputs ---
     base = os.path.join(out_dir, stem)
@@ -873,6 +981,9 @@ def build_argparser():
     p.add_argument("--anticipatory-max-gap", type=int, default=DEFAULTS["anticipatory_max_gap"],
                    help="max frames from the last lick to the extension onset for the trial "
                         "to count as having an anticipatory lead-in")
+    p.add_argument("--post-reward-s", type=float, default=DEFAULTS["post_reward_s"],
+                   help="licking within this many seconds after the spout retracts is reward "
+                        "clean-up rather than anticipation. Use 0 to count it as anticipatory")
     p.add_argument("--min-extension-s", type=float, default=None,
                    help="drop extensions shorter than this (s) -- removes blips")
     p.add_argument("--max-extension-s", type=float, default=None,
@@ -914,6 +1025,7 @@ def main(argv=None):
                extension_merge_gap=args.extension_merge_gap,
                lick_episode_gap=args.lick_episode_gap,
                anticipatory_max_gap=args.anticipatory_max_gap,
+               post_reward_s=args.post_reward_s,
                min_extension_s=args.min_extension_s,
                max_extension_s=args.max_extension_s,
                trim_start_s=args.trim_start_s, trim_end_s=args.trim_end_s)

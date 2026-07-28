@@ -66,10 +66,11 @@ def run_pipeline(df, keep_all=False, **over):
     assess = assess_trials(trials, cfg, len(df))
     accepted = [True] * len(trials) if keep_all else [a["accepted"] for a in assess]
     windows = derive_anticipatory_windows(valid, trials, cfg, accepted)
-    labels, trial_id = label_licks(len(df), trials, windows, accepted)
-    prots, bouts = extract_protrusions_and_bouts(df, valid, labels, trial_id, reg, cfg)
+    labels, trial_id, lead = label_licks(len(df), trials, windows, cfg, accepted)
+    prots, bouts = extract_protrusions_and_bouts(df, valid, labels, trial_id, reg, cfg,
+                                                 lead, trials, accepted)
     return dict(reg=reg, trials=trials, valid=valid, windows=windows, assess=assess,
-                accepted=accepted, labels=labels, trial_id=trial_id,
+                accepted=accepted, labels=labels, trial_id=trial_id, lead=lead,
                 prots=prots, bouts=bouts)
 
 
@@ -94,25 +95,60 @@ def test_leadin():
 
 
 def test_no_leadin():
-    """A trial the mouse did not lick into has no anticipatory period."""
+    """A trial the mouse did not lick into has no lead-in run, but an earlier lone lick is
+    still an anticipatory lick. It just is not flagged as leading into the reward."""
     df = make_df(3000, extensions=[(1000, 1180)],
                  tongue_runs=[(100, 110), (1020, 1040)])   # 100-110 is far before onset
     r = run_pipeline(df)
     assert r["windows"] == [None], r["windows"]
-    assert labels_of(r, 100, 110) == {"other"}
+    assert labels_of(r, 100, 110) == {"anticipatory"}
     assert labels_of(r, 1020, 1040) == {"consummatory"}
+    early = [p for p in r["prots"] if p.onset_frame == 100]
+    assert len(early) == 1 and early[0].leads_into_reward is False
 
 
-def test_orphans_are_other():
-    """Retracted licking unrelated to any extension is 'other' and never anticipatory."""
-    df = make_df(3000, extensions=[(1000, 1180)],
-                 tongue_runs=[(300, 320), (2500, 2520), (990, 1000)])
+def test_isolated_single_lick_is_kept():
+    """A lone lick made between trials with the spout retracted is still anticipatory.
+
+    The mouse often licks once without working up to a proper run of licking. Requiring an
+    'established' multi-lick bout would throw those away, so bout size must never be a filter.
+    """
+    df = make_df(6000, extensions=[(1000, 1180), (4000, 4180)],
+                 tongue_runs=[(2500, 2504)])            # one lick, far from either extension
     r = run_pipeline(df)
-    assert labels_of(r, 300, 320) == {"other"}
-    assert labels_of(r, 2500, 2520) == {"other"}
-    assert labels_of(r, 990, 1000) == {"anticipatory"}
+    assert labels_of(r, 2500, 2504) == {"anticipatory"}
     anti = [p for p in r["prots"] if p.label == "anticipatory"]
-    assert len(anti) == 1 and anti[0].onset_frame == 990
+    assert len(anti) == 1, anti
+    p = anti[0]
+    assert p.onset_frame == 2500
+    assert p.isolated is True                            # a bout of one
+    assert p.leads_into_reward is False                  # spontaneous, not a lead-in
+    assert p.trial_id == 2                               # attributed to the trial it precedes
+    assert abs(p.s_to_extension - 25.0) < 0.05           # 1500 frames at 60fps
+
+
+def test_many_isolated_licks_all_survive():
+    """Several scattered single licks are each reported, not collapsed or dropped."""
+    singles = [(300, 304), (900, 904), (2000, 2004), (2600, 2604), (3300, 3304)]
+    df = make_df(6000, extensions=[(4000, 4180)], tongue_runs=singles)
+    r = run_pipeline(df)
+    anti = sorted(p.onset_frame for p in r["prots"] if p.label == "anticipatory")
+    assert anti == [s for s, _ in singles], anti
+    assert all(p.isolated for p in r["prots"] if p.label == "anticipatory")
+
+
+def test_lead_in_flag_separates_runs_from_singles():
+    """leads_into_reward marks the run that builds into the extension, without excluding
+    the spontaneous licks from the anticipatory output."""
+    df = make_df(6000, extensions=[(4000, 4180)],
+                 tongue_runs=[(2000, 2004),                         # spontaneous single
+                              (3900, 3910), (3930, 3940)])          # run into the extension
+    r = run_pipeline(df)
+    anti = {p.onset_frame: p for p in r["prots"] if p.label == "anticipatory"}
+    assert set(anti) == {2000, 3900, 3930}, sorted(anti)
+    assert anti[2000].leads_into_reward is False
+    assert anti[3900].leads_into_reward is True
+    assert anti[3930].leads_into_reward is True
 
 
 def test_span_extension_onset():
@@ -140,13 +176,18 @@ def test_post_retraction_not_absorbed():
     assert labels_of(r, 790, 795) == {"anticipatory"}
 
 
-def test_post_retraction_far_from_next_is_other():
-    """Licking just after a retraction, with the next trial far away, is 'other'."""
+def test_post_reward_licking_separated():
+    """Licking immediately after the spout retracts is reward clean-up, not anticipation,
+    but licking later in the same gap is anticipatory again."""
     df = make_df(4000, extensions=[(500, 680), (2000, 2180)],
-                 tongue_runs=[(685, 700)])     # right after retraction, far from trial 2
+                 tongue_runs=[(685, 700),      # right after retraction -> post_reward
+                              (1200, 1204)])   # well into the gap -> anticipatory
     r = run_pipeline(df)
-    assert r["windows"][1] is None
-    assert labels_of(r, 685, 700) == {"other"}
+    assert labels_of(r, 685, 700) == {"post_reward"}
+    assert labels_of(r, 1200, 1204) == {"anticipatory"}
+    # with the window switched off it counts as anticipatory instead
+    r0 = run_pipeline(df, post_reward_s=0.0)
+    assert labels_of(r0, 685, 700) == {"anticipatory"}
 
 
 def test_flicker_fragments_merge_to_one_trial():
@@ -327,12 +368,14 @@ def test_camera_pose_invariance():
 EXPECTED = {
     "260618_082055": dict(  # first tongue-tracking model run
         ret=(296.1, 336.0), ext=(356.0, 304.0), detected=17, accepted=14, rejects=[1, 16, 17],
-        leadin=13, counts={"anticipatory": 727, "consummatory": 1019, "other": 746},
-        window_median=193, anti_prot=129),
+        leadin=13, window_median=193,
+        counts={"anticipatory": 875, "consummatory": 1019, "post_reward": 65, "other": 533},
+        anti_prot=184, anti_lead=129, anti_solo=46),
     "260723_143602": dict(  # retrained model -- fewer, cleaner tongue detections
         ret=(296.0, 336.0), ext=(352.0, 304.0), detected=16, accepted=14, rejects=[1, 16],
-        leadin=12, counts={"anticipatory": 435, "consummatory": 766, "other": 308},
-        window_median=192, anti_prot=112),
+        leadin=12, window_median=192,
+        counts={"anticipatory": 488, "consummatory": 766, "post_reward": 59, "other": 196},
+        anti_prot=132, anti_lead=112, anti_solo=18),
 }
 
 
@@ -359,14 +402,20 @@ def test_regression_real_csv():
                    r["assess"][i - 1]["outside_session"] for i in rej), key
         assert sum(w is not None for w in r["windows"]) == exp["leadin"], key
         lab = np.asarray(r["labels"])[r["valid"]]
-        counts = {k: int((lab == k).sum()) for k in ("anticipatory", "consummatory", "other")}
+        counts = {k: int((lab == k).sum())
+                  for k in ("anticipatory", "consummatory", "post_reward", "other")}
         assert counts == exp["counts"], (key, counts)
         wl = [b - a for w in r["windows"] if w for a, b in [w]]
         assert int(np.median(wl)) == exp["window_median"], (key, np.median(wl))
-        n_anti = sum(p.label == "anticipatory" for p in r["prots"])
-        assert n_anti == exp["anti_prot"], (key, n_anti)
+        ap = [p for p in r["prots"] if p.label == "anticipatory"]
+        assert len(ap) == exp["anti_prot"], (key, len(ap))
+        lead = sum(p.leads_into_reward for p in ap)
+        solo = sum(p.isolated and not p.leads_into_reward for p in ap)
+        assert lead == exp["anti_lead"], (key, lead)
+        assert solo == exp["anti_solo"], (key, solo)
         print(f"    [{key}] {exp['detected']} detected / {exp['accepted']} accepted "
-              f"({exp['leadin']} lead-in), {counts}, {n_anti} anticipatory protrusions")
+              f"({exp['leadin']} lead-in), {counts}, {len(ap)} anticipatory licks "
+              f"({lead} lead-in, {solo} lone singles)")
 
 
 # ---------------------------------------------------------------------------- runner

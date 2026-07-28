@@ -12,13 +12,21 @@ The spout only swings in toward the mouse once it has turned the wheel enough to
 and it pulls back afterward. Every extension is therefore a reward trial, and licks are sorted
 by where they land around one.
 
-Licking that starts on its own and runs until the spout arrives is anticipatory. Licking that
-happens while the spout is out is consummatory. Any other licking with the spout pulled back is
-labelled other and is kept out of the anticipatory files.
+A lick counts as anticipatory whenever the spout is pulled back during the session, since no
+reward is available at that moment. Licking while the spout is out is consummatory. Licking in
+the couple of seconds right after the spout retracts is treated separately as post reward,
+because the mouse is finishing what it just earned rather than anticipating anything.
 
-That last group is not a rounding error. In the sessions I checked, a large chunk of the licking
-done with the spout retracted never leads into a reward at all, so counting all of it as
-anticipatory inflates the number by roughly double.
+Bout size is never used as a filter. The mouse often licks once between trials without working
+up to a proper run, and a lone lick like that is still a lick made with no reward available, so
+it is reported the same as any other. On the sessions I checked, most of the spontaneous
+anticipatory licks are exactly these single licks, so dropping them would lose a real chunk of
+the data.
+
+Runs that build straight into a spout extension are still worth telling apart, so every lick
+carries a `leads_into_reward` flag along with the trial it belongs to and how long it fell
+before that trial's reward. Nothing gets excluded to make that distinction. It is a column, so
+either view is one filter away.
 
 ## Camera angles
 
@@ -58,8 +66,14 @@ Four files come out per video.
 |---|---|
 | `<name>_anticipatory_licks.csv` | one row per anticipatory tongue protrusion, which is the main result |
 | `<name>_anticipatory_bouts.csv` | one row per anticipatory licking period |
-| `<name>_lick_bouts.csv` | every bout across all three categories, with a trial number |
+| `<name>_lick_bouts.csv` | every bout across all categories, with a trial number |
 | `<name>_trials.csv` | one row per spout extension |
+
+The columns worth knowing in the licks file are `leads_into_reward`, which is true when the lick
+sits in a run building into an extension, `isolated`, which is true when it was the only lick in
+its bout, and `s_to_extension`, which is how many seconds passed before that trial's reward
+arrived. Filtering on those gets you established licking runs only, or lone licks only, without
+having to rerun anything.
 
 ## Raw recordings
 
@@ -118,10 +132,11 @@ check the split.
 python test_lick_logic.py
 ```
 
-Fifteen tests. Most of them build small fake sessions where the right answer is known and check
-the labelling exactly, covering things like licking that crosses an extension, licking left over
-from the previous trial, extensions broken into fragments by tracking dropout, and sessions with
-no rewards in them at all. The rest cover camera pose and pin the numbers from the real sessions.
+Seventeen tests. Most of them build small fake sessions where the right answer is known and
+check the labelling exactly, covering things like licking that crosses an extension, licking
+left over from the previous trial, extensions broken into fragments by tracking dropout,
+sessions with no rewards in them at all, and lone single licks scattered between trials. The
+rest cover camera pose and pin the numbers from the real sessions.
 
 ## Data files
 
@@ -131,8 +146,10 @@ CSVs are absent and skip themselves, so the rest of the suite still runs on a fr
 
 ## Tuning
 
-Defaults assume sixty frames per second. The two settings worth knowing about are
-`--lick-episode-gap`, which is how long a pause can get before it counts as a separate run of
-licking and therefore decides where an anticipatory window starts, and `--tongue-score-min`,
-which is the SLEAP confidence needed before a tongue is believed. Run any of the scripts with
-`--help` for the rest.
+Defaults assume sixty frames per second. The ones worth knowing about are `--post-reward-s`,
+which is how long after a retraction still counts as finishing the reward rather than
+anticipating the next one, and `--tongue-score-min`, which is the SLEAP confidence needed before
+a tongue is believed. Setting `--post-reward-s 0` folds that licking into the anticipatory pile
+instead. There is also `--lick-episode-gap`, which only decides where a lead-in run is judged to
+begin and no longer affects which licks are counted. Run any of the scripts with `--help` for
+the rest.

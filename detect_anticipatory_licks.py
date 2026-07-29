@@ -93,6 +93,24 @@ DEFAULTS = dict(
 
 NODES = ["nose", "tongue", "spout_tip", "left_paw", "right_paw"]
 
+# Everything this script writes. The names keep the source stem, which itself contains
+# "analysis", so they match the same glob the inputs do and would otherwise be re-ingested on a
+# second run over the same folder.
+OUTPUT_SUFFIXES = ("_anticipatory_licks.csv", "_anticipatory_bouts.csv", "_lick_bouts.csv",
+                   "_trials.csv", "_frames_annotated.csv", "combined_session_summary.csv")
+
+
+def is_output_file(path: str) -> bool:
+    return os.path.basename(path).endswith(OUTPUT_SUFFIXES)
+
+
+def find_input_csvs(folder: str):
+    """SLEAP analysis CSVs in `folder`, skipping this script's own output."""
+    hits = sorted(glob.glob(os.path.join(folder, "*analysis*.csv")))
+    if not hits:
+        hits = sorted(glob.glob(os.path.join(folder, "*.csv")))
+    return [f for f in hits if not is_output_file(f)]
+
 
 # --------------------------------------------------------------------------------------
 # Small geometry / stats helpers
@@ -145,19 +163,81 @@ class SpoutRegions:
     extended: np.ndarray | None           # (x, y) or None if not found
     separation: float = 0.0               # px between centroids
     n_calib: int = 0
-    ext_support: int = 0                  # frames assigned to extended during calibration
+    ext_support: int = 0                  # frames sitting at the extended position
+    radius: float = 0.0                   # how close counts as "at" a position
     note: str = ""
+
+
+def _blob_edge(disp: np.ndarray) -> float:
+    """Radius at which the dominant (retracted) cloud has thinned out.
+
+    Derived from the data, so it scales with the camera's zoom instead of assuming pixels.
+    """
+    inner = disp[disp <= np.percentile(disp, 99.9)]
+    if len(inner) < 50:
+        return float(np.percentile(disp, 99)) if len(disp) else 0.0
+    nb = 60
+    hist, edges = np.histogram(inner, bins=nb)
+    centers = 0.5 * (edges[:-1] + edges[1:])
+    kern = np.array([1, 2, 3, 2, 1], float)
+    sm = np.convolve(hist, kern / kern.sum(), mode="same")
+    peak = int(np.argmax(sm))
+    thr = 0.02 * sm[peak]
+    i = peak
+    while i < nb and sm[i] >= thr:
+        i += 1
+    return float(centers[min(i, nb - 1)])
+
+
+def _position_clusters(P: np.ndarray, radius: float, max_k: int = 8):
+    """Greedy density clustering of 2-D points. Returns [(centroid, n_points), ...].
+
+    Repeatedly takes the densest cell of a coarse histogram, absorbs everything within
+    `radius` of it, and removes those points.
+    """
+    out = []
+    rest = P
+    while len(rest) >= 10 and len(out) < max_k:
+        bins = max(4, int(np.ptp(rest, axis=0).max() / max(radius, 1e-6)) + 1)
+        H, xe, ye = np.histogram2d(rest[:, 0], rest[:, 1], bins=bins)
+        bx, by = np.unravel_index(int(np.argmax(H)), H.shape)
+        seed = np.array([(xe[bx] + xe[bx + 1]) / 2, (ye[by] + ye[by + 1]) / 2])
+        near = _dist(rest[:, 0], rest[:, 1], seed[0], seed[1]) <= radius
+        if not near.any():
+            break
+        c = np.median(rest[near], axis=0)                     # refine on the members
+        near = _dist(rest[:, 0], rest[:, 1], c[0], c[1]) <= radius
+        out.append((c, int(near.sum())))
+        rest = rest[~near]
+    return out
+
+
+def _runs_at(sx, sy, sc, centre, radius, cfg):
+    """Contiguous runs where the spout sits at `centre`, after closing detector flicker."""
+    at = (_dist(sx, sy, centre[0], centre[1]) <= radius) & \
+         (sc >= cfg["spout_score_min"]) & np.isfinite(sx)
+    merged = []
+    for s, e in _mask_runs(at):
+        if merged and s - merged[-1][1] <= cfg["extension_merge_gap"]:
+            merged[-1] = (merged[-1][0], e)
+        else:
+            merged.append((s, e))
+    return [(s, e) for s, e in merged if (e - s) >= cfg["min_extended_run"]]
 
 
 def learn_spout_regions(df: pd.DataFrame, cfg: dict,
                         ret_override=None, ext_override=None) -> SpoutRegions:
-    """Robustly find the retracted and extended spout centroids for THIS video.
+    """Find the retracted position and the reward-delivery position for THIS video.
 
-    Recipe (validated on the sample; naive k-means fails due to ~97/3 imbalance + outliers):
-      retracted = component-wise median of high-confidence spout points (outlier-robust);
-      extended  = secondary density peak in the displacement-from-retracted distribution,
-                  taking the median of points beyond the histogram valley, after trimming
-                  sparse far outliers.
+    The retracted position is easy -- it dominates the recording, so a component-wise median
+    of the high-confidence spout points nails it and shrugs off outliers.
+
+    The reward position is the subtle one. Picking the biggest cluster away from retracted is
+    wrong: raw recordings open with a setup period where the spout is parked somewhere else or
+    swung around by hand, and that can outweigh the real trials by frame count many times over.
+    What actually identifies reward delivery is that the rig drives the spout to the *same*
+    place for the *same* length of time, over and over. So each candidate position is scored by
+    how many repeat visits it gets at a consistent duration, and the winner takes it.
     """
     hi = df[df["spout_tip.score"] > cfg["spout_calib_score_min"]].dropna(
         subset=["spout_tip.x", "spout_tip.y"])
@@ -170,80 +250,65 @@ def learn_spout_regions(df: pd.DataFrame, cfg: dict,
     else:
         ret = np.median(X, axis=0)
 
+    disp = _dist(X[:, 0], X[:, 1], ret[0], ret[1])
+    edge = _blob_edge(disp)
+    radius = max(edge, 1.0)
+
     if ext_override is not None:
         ext = np.asarray(ext_override, float)
         sep = float(_dist(ret[0], ret[1], ext[0], ext[1]))
-        return SpoutRegions(ret, ext, sep, len(X), 0, "extended region set by override")
+        return SpoutRegions(ret, ext, sep, len(X), 0, radius, "extended position set by override")
 
-    disp = _dist(X[:, 0], X[:, 1], ret[0], ret[1])
+    if len(X) < 50:
+        return SpoutRegions(ret, None, 0.0, len(X), 0, radius, "too few spout points to calibrate")
 
-    # The retracted blob dominates (>~95%) and can be pathologically tight (so MAD-based gaps
-    # collapse). Instead find the extended cluster as a SEPARATE density bump: build a
-    # displacement histogram, take the dominant (retracted) peak, then the most populated local
-    # maximum beyond it (the retracted tail is monotonic, so it has no local max), and put the
-    # threshold at the empty valley between them. Bin width scales with the data -> angle/zoom
-    # invariant.
+    far = X[disp > edge]
     n_min = max(20, cfg["min_extended_frac"] * len(X))
-    inner = disp[disp <= np.percentile(disp, 99.9)]  # drop only gross outliers
-    if len(inner) < 50:
-        return SpoutRegions(ret, None, 0.0, len(X), 0, "too few spout points to calibrate")
-
-    nb = 60
-    hist, edges = np.histogram(inner, bins=nb)
-    centers = 0.5 * (edges[:-1] + edges[1:])
-    kern = np.array([1, 2, 3, 2, 1], float)
-    sm = np.convolve(hist, kern / kern.sum(), mode="same")
-    peak = int(np.argmax(sm))
-
-    # local maxima beyond the retracted peak (its tail is monotonic, so it has none).
-    # NB: include the final bin -- a perfectly separated extended cluster lands there.
-    cand = [i for i in range(peak + 2, nb)
-            if sm[i] >= sm[i - 1] and (i == nb - 1 or sm[i] >= sm[i + 1]) and sm[i] > 0]
-    if not cand:
-        return SpoutRegions(ret, None, 0.0, len(X), 0,
-                            "no separated extended cluster (single spout position)")
-    # Choose the candidate that is separated from the retracted blob by a genuinely EMPTY
-    # valley -- not merely the most populated one. The retracted spout often has fine
-    # sub-structure (a second resting position a few px away) that can be far more populated
-    # than the real extended cluster; picking by population alone latches onto that
-    # sub-structure and loses the true extension. A real ~1-inch spout movement always leaves
-    # a near-empty gap behind it, so emptiness is the reliable discriminator. This also
-    # subsumes the old "is there a valley at all" guard, so a stationary spout's own jitter
-    # (a smooth unimodal blob with only shallow ripples) yields no candidate at all.
-    best = None
-    for i in cand:
-        v = peak + int(np.argmin(sm[peak:i + 1]))
-        if sm[v] <= 0.25 * sm[i] and (best is None or sm[i] > sm[best[0]]):
-            best = (i, v)
-    if best is None:
-        return SpoutRegions(ret, None, 0.0, len(X), 0,
-                            "no cleanly separated second region (spout never extended)")
-    valley = best[1]
-    t_ext = float(centers[valley])
-
-    # Guard: the separation must also dwarf the retracted blob's own extent.
-    inner_pts = disp[disp <= t_ext]
-    extent = float(np.percentile(inner_pts, 95)) if len(inner_pts) else 0.0
-
-    far = X[disp > t_ext]
     if len(far) < n_min:
-        return SpoutRegions(ret, None, 0.0, len(X), len(far),
-                            "extended cluster too small to trust")
-    # drop sparse mis-detections within the far points before taking the centroid
-    fd = _dist(far[:, 0], far[:, 1], ret[0], ret[1])
-    keep = np.abs(fd - np.median(fd)) <= 5.0 * (_mad(fd) or 1.0)
-    ext_pts = far[keep]
-    if len(ext_pts) < n_min:
-        return SpoutRegions(ret, None, 0.0, len(X), len(ext_pts),
-                            "extended cluster too small to trust")
+        return SpoutRegions(ret, None, 0.0, len(X), len(far), radius,
+                            "spout never leaves its resting position")
 
-    ext = np.median(ext_pts, axis=0)
-    sep = float(_dist(ret[0], ret[1], ext[0], ext[1]))
-    if sep < 3.0 * extent:
-        return SpoutRegions(ret, None, 0.0, len(X), len(ext_pts),
-                            "candidate region too close to the retracted blob (noise)")
-    return SpoutRegions(ret, ext, sep, len(X), len(ext_pts),
-                        f"valley@{t_ext:.0f}px, {len(ext_pts)} extended pts")
+    sx = df["spout_tip.x"].to_numpy(float)
+    sy = df["spout_tip.y"].to_numpy(float)
+    sc = df["spout_tip.score"].to_numpy(float)
+
+    best, best_key, fallback, fb_key, notes = None, None, None, None, []
+    for c, npts in _position_clusters(far, radius):
+        sep_c = _dist(c[0], c[1], ret[0], ret[1])
+        # A real extension throws the spout clear of its resting jitter. Anything hugging the
+        # rest blob is the spout in transit, not a place it is driven to and held.
+        if sep_c <= 2 * edge:
+            continue
+        runs = _runs_at(sx, sy, sc, c, radius, cfg)
+        if not runs:
+            continue
+        d = np.array([e - s for s, e in runs], float)
+        med = float(np.median(d))
+        n_rep = int(np.sum(np.abs(d - med) <= 0.25 * med))
+        agree = n_rep / len(runs)
+        notes.append(f"({c[0]:.0f},{c[1]:.0f}) {len(runs)} visits, {n_rep} at ~{med/cfg['fps']:.2f}s")
+        if fb_key is None or npts > fb_key:
+            fallback, fb_key = c, npts
+        # The rig drives the spout to the reward position for a fixed time, so nearly every
+        # visit should share one duration. Points along the travel path collect many visits of
+        # scattered length, which is what this rejects.
+        if n_rep >= 2 and agree >= 0.5:
+            key = (n_rep, agree, sep_c)
+            if best_key is None or key > best_key:
+                best, best_key = c, key
+
+    if best is None and fallback is not None:
+        best = fallback
+        notes.append("no position had repeatable visit lengths; fell back to the most occupied")
+    if best is None:
+        return SpoutRegions(ret, None, 0.0, len(X), 0, radius,
+                            "no repeated spout position found away from rest")
+
+    sep = float(_dist(ret[0], ret[1], best[0], best[1]))
+    support = int(np.sum(_dist(far[:, 0], far[:, 1], best[0], best[1]) <= radius))
+    note = f"rest-blob edge {edge:.0f}px; chose " + notes[0] if len(notes) == 1 else \
+           f"rest-blob edge {edge:.0f}px; candidates " + " | ".join(notes)
+    return SpoutRegions(ret, best, sep, len(X), support, radius, note)
 
 
 # --------------------------------------------------------------------------------------
@@ -282,19 +347,10 @@ def find_extension_events(df: pd.DataFrame, reg: SpoutRegions, cfg: dict):
     sx = df["spout_tip.x"].to_numpy(float)
     sy = df["spout_tip.y"].to_numpy(float)
     sc = df["spout_tip.score"].to_numpy(float)
-    d_ret = _dist(sx, sy, reg.retracted[0], reg.retracted[1])
-    d_ext = _dist(sx, sy, reg.extended[0], reg.extended[1])
-    gate = 0.6 * reg.separation                      # must be clearly in a region's basin
-    trust = (sc >= cfg["spout_score_min"]) & np.isfinite(sx) & np.isfinite(sy)
-    raw = trust & (d_ext < d_ret) & (np.minimum(d_ret, d_ext) <= gate)
-
-    merged = []
-    for s, e in _mask_runs(raw):
-        if merged and s - merged[-1][1] <= cfg["extension_merge_gap"]:
-            merged[-1] = (merged[-1][0], e)          # CLOSE
-        else:
-            merged.append((s, e))
-    trials = [(s, e) for s, e in merged if (e - s) >= cfg["min_extended_run"]]  # OPEN
+    # An extension is the spout sitting AT the learned reward position, not merely "closer to
+    # extended than to retracted". Recordings contain other spout placements (setup, hand
+    # adjustment); a nearest-of-two rule would sweep those in as rewards.
+    trials = _runs_at(sx, sy, sc, reg.extended, reg.radius, cfg)   # CLOSE then OPEN
 
     # optional duration gate -- the rig extends the spout for a fixed time (~3s on the sample),
     # so wildly off-duration "extensions" are artifacts (e.g. the spout parked out before the
@@ -353,6 +409,54 @@ def assess_trials(trials, cfg, n_frames):
             accepted=bool(not outlier[i] and not outside),
         ))
     return out
+
+
+def session_bounds(df: pd.DataFrame, reg: SpoutRegions, trials, accepted, cfg, n: int):
+    """Frame range over which licking can be scored, as [lo, hi).
+
+    Raw recordings open with the animal being mounted and the spout being placed or primed by
+    hand, and close with it being taken off. During setup the spout is often held at the mouth
+    at some position that is not the reward position at all, so the mouse is licking a spout
+    that is right there. Counting that as anticipation would be wrong.
+
+    Any run with the spout away from rest that is not one of the accepted reward trials is
+    treated as such an off-protocol placement. The session therefore starts after the last one
+    of those preceding the first reward, and runs to the last reward plus the post-reward
+    window.
+    """
+    acc = [t for t, ok in zip(trials, accepted) if ok]
+    if not acc:
+        return 0, n
+    first_s, last_e = acc[0][0], acc[-1][1]
+    pr = int(round(cfg["post_reward_s"] * cfg["fps"]))
+
+    lo = 0
+    if reg.extended is not None:
+        sx = df["spout_tip.x"].to_numpy(float)
+        sy = df["spout_tip.y"].to_numpy(float)
+        sc = df["spout_tip.score"].to_numpy(float)
+        away = (_dist(sx, sy, reg.retracted[0], reg.retracted[1]) > reg.radius) & \
+               (sc >= cfg["spout_score_min"]) & np.isfinite(sx)
+        merged = []
+        for s, e in _mask_runs(away):
+            if merged and s - merged[-1][1] <= cfg["extension_merge_gap"]:
+                merged[-1] = (merged[-1][0], e)
+            else:
+                merged.append((s, e))
+        acc_starts = {s for s, _ in acc}
+        for s, e in merged:
+            if (e - s) < cfg["min_extended_run"] or e > first_s:
+                continue
+            if s in acc_starts:            # a genuine reward trial, not a placement
+                continue
+            lo = max(lo, e)
+
+    hi = min(n, last_e + max(pr, 1))
+    if cfg.get("trim_start_s") is not None:
+        lo = max(lo, int(round(cfg["trim_start_s"] * cfg["fps"])))
+    if cfg.get("trim_end_s") is not None:
+        hi = min(hi, n - int(round(cfg["trim_end_s"] * cfg["fps"])))
+    return lo, max(hi, lo)
 
 
 def state_from_trials(n: int, trials, index=None) -> pd.Series:
@@ -495,7 +599,7 @@ def derive_anticipatory_windows(valid: np.ndarray, trials, cfg: dict, accepted=N
     return windows
 
 
-def label_licks(n: int, trials, windows, cfg, accepted=None):
+def label_licks(n: int, trials, windows, cfg, accepted=None, bounds=None):
     """Per-frame label, trial id, and a lead-in flag.
 
     A lick is ANTICIPATORY whenever the spout is retracted during the active session and the
@@ -526,25 +630,8 @@ def label_licks(n: int, trials, windows, cfg, accepted=None):
         return labels, trial_id, lead
 
     pr = int(round(cfg["post_reward_s"] * cfg["fps"]))
-    fps = cfg["fps"]
-    first_s = acc[0][1]
     last_e = acc[-1][2]
-
-    # Session start. Before the first reward the mouse is already working for one, so that
-    # licking counts. The one thing to stay clear of is the mount-up period at the head of the
-    # recording, which shows up as a rejected extension (the spout parked out) before the first
-    # real trial, so start just after the last of those. Session end is the last reward plus the
-    # post-reward window, since after that we cannot tell a running session from the mouse being
-    # taken off.
-    lo = 0
-    for i, (s, e) in enumerate(trials):
-        if not accepted[i] and e <= first_s:
-            lo = max(lo, e)
-    hi = min(n, last_e + max(pr, 1))
-    if cfg.get("trim_start_s") is not None:
-        lo = max(lo, int(round(cfg["trim_start_s"] * fps)))
-    if cfg.get("trim_end_s") is not None:
-        hi = min(hi, n - int(round(cfg["trim_end_s"] * fps)))
+    lo, hi = bounds if bounds is not None else (0, n)
 
     # Everything inside the session with the spout retracted starts out anticipatory, and is
     # attributed to the next extension it precedes.
@@ -880,7 +967,8 @@ def process_one(csv_path: str, args, cfg: dict, out_dir: str) -> dict:
     if args.keep_all_trials:
         accepted = [True] * len(trials)
     windows = derive_anticipatory_windows(valid, trials, cfg, accepted)
-    labels, trial_id, lead = label_licks(len(df), trials, windows, cfg, accepted)
+    bounds = session_bounds(df, reg, trials, accepted, cfg, len(df))
+    labels, trial_id, lead = label_licks(len(df), trials, windows, cfg, accepted, bounds)
     prots, bouts = extract_protrusions_and_bouts(df, valid, labels, trial_id, reg, cfg,
                                                  lead, trials, accepted)
 
@@ -1037,11 +1125,9 @@ def main(argv=None):
             pass
 
     if os.path.isdir(args.input):
-        files = sorted(glob.glob(os.path.join(args.input, "*analysis*.csv")))
+        files = find_input_csvs(args.input)
         if not files:
-            files = sorted(glob.glob(os.path.join(args.input, "*.csv")))
-        if not files:
-            print(f"No CSV files found in {args.input}")
+            print(f"No SLEAP analysis CSVs found in {args.input}")
             return 1
     else:
         files = [args.input]

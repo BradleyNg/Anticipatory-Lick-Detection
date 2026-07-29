@@ -28,17 +28,34 @@ carries a `leads_into_reward` flag along with the trial it belongs to and how lo
 before that trial's reward. Nothing gets excluded to make that distinction. It is a column, so
 either view is one filter away.
 
+## Finding the reward position
+
+A recording usually holds more than two spout positions. Besides resting and delivering reward,
+the spout gets parked or held by hand while the animal is being mounted, and that placement can
+occupy far more frames than every real trial put together. One of the sessions here spends 175
+seconds parked in a spot that is nowhere near the reward position, against ten rewards of three
+seconds each.
+
+So the reward position is not taken to be the busiest place the spout visits. It is the place
+the spout keeps returning to for the **same length of time**, because that is what the rig
+actually does. Candidate positions are scored on how many repeat visits agree on a duration, and
+points strung along the travel path get rejected that way too, since their visit lengths
+scatter.
+
 ## Camera angles
 
-Every recording sits at a slightly different angle and zoom, so nothing in the code refers to a
-fixed pixel position. The two spout positions are found by clustering the spout points from
-whichever video is being processed, and every threshold after that is either a distance to one of
-those learned positions or a ratio. The one fixed number is the SLEAP confidence cutoff, which
-belongs to the model rather than to the camera.
+Every recording sits at a different angle and zoom, so nothing in the code refers to a fixed
+pixel position. The spout positions are learned from whichever video is being processed, and
+every threshold after that is either a distance to one of those learned positions or a ratio.
+The one fixed number is the SLEAP confidence cutoff, which belongs to the model rather than to
+the camera.
 
-There is a test that re-projects a real session through thirteen camera poses, including
-rotation, zoom, mirroring, shear and perspective, and checks the same anticipatory licks come
-back every time.
+A test re-projects a real session through thirteen camera poses. Seven of them are similarity
+transforms, meaning translation, rotation, zoom and mirroring, which is what moving a camera
+actually does. Those preserve every distance ratio, so the test demands bit for bit identical
+output. The other six add shear, anisotropic scaling and perspective, which genuinely distort
+ratios, so there the test allows a lick sitting exactly on a learned boundary to tip either way
+and checks that the trials and effectively all the licks still come back.
 
 ## Getting set up
 
@@ -126,23 +143,48 @@ bout the spout should be sitting at R with a real tongue under the red dot.
 Swapping in `--class other` shows what the trial filter threw out, which is a quick way to sanity
 check the split.
 
+## How it holds up on real sessions
+
+Three sessions from different mice, recorded at three different resolutions (960x600, 800x500
+and 640x400) and all at sixty frames per second.
+
+|  | F19_F18 | M13_M22 | M15_F16 |
+|---|---|---|---|
+| extensions found, then accepted | 15, 14 | 18, 13 | 10, 10 |
+| accepted trial length | 2.93 to 2.98s | 2.87 to 2.98s | 2.90 to 2.93s |
+| anticipatory licks | 134 | 23 | 730 |
+| in a run leading into a reward | 116 | 5 | 44 |
+| lone single licks between trials | 18 | 14 | 309 |
+
+The check worth trusting is the spout itself. Across all three sessions it sits at the learned
+reward position on **100 percent** of the frames inside an accepted trial, and back at rest on
+95 to 99.8 percent of the frames outside one. Accepted trial lengths land between 2.87 and 2.98
+seconds everywhere, which is the rig repeating one fixed action.
+
+The three sessions behave very differently, and that is real rather than a fault. M13 hardly
+licks at all except when reward is there. M15 is a progressive ratio session, so its rewards
+come further and further apart, at 53, 77, 158, 215, 269, 329, 527, 492 and 541 seconds, while
+the mouse goes on licking the empty spout position throughout. That is where its much larger
+anticipatory count comes from.
+
 ## Tests
 
 ```
 python test_lick_logic.py
 ```
 
-Seventeen tests. Most of them build small fake sessions where the right answer is known and
-check the labelling exactly, covering things like licking that crosses an extension, licking
-left over from the previous trial, extensions broken into fragments by tracking dropout,
-sessions with no rewards in them at all, and lone single licks scattered between trials. The
-rest cover camera pose and pin the numbers from the real sessions.
+Nineteen tests. Most of them build small fake sessions where the right answer is known and check
+the labelling exactly, covering licking that crosses an extension, licking left over from the
+previous trial, extensions broken into fragments by tracking dropout, sessions with no rewards
+in them at all, lone single licks scattered between trials, and a setup placement that outweighs
+the real trials. The rest cover camera pose and pin the numbers from all three real sessions.
 
 ## Data files
 
 Recordings, tracking exports and anything the scripts write are kept out of the repo by
-.gitignore. They are large and they are not mine to publish. The regression tests notice when the
-CSVs are absent and skip themselves, so the rest of the suite still runs on a fresh clone.
+.gitignore. They are large and they are not mine to publish. The tests that need a session CSV
+say so loudly and skip when it is absent, rather than quietly reporting a pass, so the rest of
+the suite still runs on a fresh clone.
 
 ## Tuning
 

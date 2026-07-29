@@ -15,6 +15,7 @@ Run:  python test_lick_logic.py
 from __future__ import annotations
 
 import glob
+import os
 import sys
 import traceback
 
@@ -271,6 +272,56 @@ def test_explicit_trim_overrides():
     assert [x["accepted"] for x in r["assess"]] == [False, True, True]
     r2 = run_pipeline(df, trim_end_s=30.0)       # last 30s -> frame 7200 -> drops trial 3
     assert [x["accepted"] for x in r2["assess"]] == [True, True, False]
+
+
+def test_csv_is_the_only_required_input():
+    """The analysis CSV must be enough on its own.
+
+    The script sits in the pipeline purely to turn the model's tongue and spout output into
+    scored licks, so it must never reach for the video, the .slp, a rig log, or anything else.
+    This runs it in an empty directory holding nothing but the script and one CSV.
+    """
+    import shutil, subprocess, sys, tempfile
+    src = [f for f in glob.glob("*analysis*.csv") + glob.glob("*/*analysis*.csv")
+           if not is_output_file(f)]
+    if not src:
+        print("    (SKIPPED, no session CSV present)")
+        return
+    script = "detect_anticipatory_licks.py"
+    tmp = tempfile.mkdtemp(prefix="lickonly_")
+    try:
+        shutil.copy(script, tmp)
+        shutil.copy(sorted(src)[0], os.path.join(tmp, "only.analysis.csv"))
+        assert sorted(os.listdir(tmp)) == [script, "only.analysis.csv"]
+        r = subprocess.run([sys.executable, script, "only.analysis.csv"],
+                           cwd=tmp, capture_output=True, text=True)
+        assert r.returncode == 0, r.stdout + r.stderr
+        made = set(os.listdir(tmp)) - {script, "only.analysis.csv"}
+        for want in ("only.analysis_anticipatory_licks.csv", "only.analysis_trials.csv"):
+            assert want in made, (want, made)
+        # the module must not pull in anything beyond pandas/numpy from the stdlib set
+        text = open(script).read()
+        for banned in ("import cv2", "import matplotlib", "import sklearn", "import scipy"):
+            assert banned not in text, banned
+        print(f"    ran standalone in an empty dir, wrote {len(made)} files")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_bad_csv_reports_failure_in_exit_code():
+    """A CSV the script cannot use must fail loudly rather than exiting clean."""
+    import subprocess, sys, tempfile, shutil
+    tmp = tempfile.mkdtemp(prefix="lickbad_")
+    try:
+        shutil.copy("detect_anticipatory_licks.py", tmp)
+        pd.DataFrame({"frame_idx": [0, 1], "nose.x": [1.0, 1.0]}).to_csv(
+            os.path.join(tmp, "broken.analysis.csv"), index=False)
+        r = subprocess.run([sys.executable, "detect_anticipatory_licks.py", "broken.analysis.csv"],
+                           cwd=tmp, capture_output=True, text=True)
+        assert r.returncode != 0, "a malformed CSV exited 0"
+        assert "ERROR" in r.stdout + r.stderr
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 def test_setup_position_not_mistaken_for_reward():

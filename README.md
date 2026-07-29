@@ -57,25 +57,34 @@ output. The other six add shear, anisotropic scaling and perspective, which genu
 ratios, so there the test allows a lick sitting exactly on a learned boundary to tip either way
 and checks that the trials and effectively all the licks still come back.
 
-## Getting set up
+## What it needs
 
-Python 3 with pandas and numpy.
+The SLEAP analysis CSV. That is the whole list. Not the video, not the .slp, not a rig log.
+
+The job is deliberately narrow. Take the tongue and spout the model reports, throw out what is
+not a real lick, and sort what is left by where it falls around reward delivery, so the model
+can be judged on how well it picks up anticipatory licking. A test enforces this by running the
+script in an empty directory containing nothing but the script and one CSV.
+
+Python 3 with pandas and numpy, and nothing else.
 
 ```
 pip install pandas numpy
 ```
 
-The contact sheet script also wants opencv-python, but only if you plan to check results against
-video.
+The two checking tools further down are separate and optional. Only the contact sheet one wants
+opencv-python, and only if you want to eyeball results against video.
 
 ## Running the detector
 
 ```
-python detect_anticipatory_licks.py path/to/video.analysis.csv
+python detect_anticipatory_licks.py path/to/session.analysis.csv
 ```
 
 Point it at a folder instead and it works through every analysis CSV inside, then writes a
-combined summary next to them.
+combined summary next to them. Files the script has already written get skipped, so running it
+over the same folder twice is safe. A CSV it cannot use is reported and makes the run exit
+nonzero rather than passing quietly.
 
 Four files come out per video.
 
@@ -173,11 +182,13 @@ anticipatory count comes from.
 python test_lick_logic.py
 ```
 
-Nineteen tests. Most of them build small fake sessions where the right answer is known and check
-the labelling exactly, covering licking that crosses an extension, licking left over from the
-previous trial, extensions broken into fragments by tracking dropout, sessions with no rewards
-in them at all, lone single licks scattered between trials, and a setup placement that outweighs
-the real trials. The rest cover camera pose and pin the numbers from all three real sessions.
+Twenty one tests. Most of them build small fake sessions where the right answer is known and
+check the labelling exactly, covering licking that crosses an extension, licking left over from
+the previous trial, extensions broken into fragments by tracking dropout, sessions with no
+rewards in them at all, lone single licks scattered between trials, and a setup placement that
+outweighs the real trials. Two more run the script in an empty directory to prove the CSV is all
+it needs and that a bad CSV fails loudly. The rest cover camera pose and pin the numbers from all
+three real sessions.
 
 ## Data files
 

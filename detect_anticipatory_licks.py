@@ -43,12 +43,20 @@ Outputs
 
 The rig touch-sensor timestamps are used (optionally) only to *verify* the classification.
 
+Only input required
+-------------------
+The SLEAP analysis CSV. Nothing else -- not the video, not the .slp, not any rig log. The job
+here is narrow on purpose: take the tongue and spout the model reports, filter out what is not
+a real lick, and sort what remains by where it falls relative to reward delivery, so the model
+can be judged on how well it picks up anticipatory licking. Only pandas and numpy are needed.
+
 Usage
 -----
     python detect_anticipatory_licks.py INPUT [options]
 
-INPUT may be a single SLEAP analysis CSV or a folder (every *analysis*.csv inside it is
-processed, with a combined cross-session summary written too).
+INPUT may be a single SLEAP analysis CSV or a folder (every analysis CSV inside it is
+processed, with a combined cross-session summary written too). Files this script has already
+written are skipped, so re-running over the same folder is safe.
 
 Run `python detect_anticipatory_licks.py --help` for all options.
 """
@@ -1049,8 +1057,12 @@ def _pair(s):
 
 def build_argparser():
     p = argparse.ArgumentParser(
-        description="Detect anticipatory vs consummatory licks from SLEAP tongue/spout CSVs.")
-    p.add_argument("input", help="SLEAP analysis CSV file OR a folder of them")
+        description="Detect anticipatory vs consummatory licks from a SLEAP analysis CSV. "
+                    "The CSV is the ONLY input required -- no video, no .slp, no rig log. "
+                    "Everything else is an optional override.",
+        epilog="Needs only pandas and numpy.")
+    p.add_argument("input", help="a SLEAP analysis CSV, or a folder of them. This is the only "
+                                 "input the script needs")
     p.add_argument("--out-dir", default=None,
                    help="output directory (default: alongside each input CSV)")
     p.add_argument("--fps", type=float, default=DEFAULTS["fps"])
@@ -1132,14 +1144,15 @@ def main(argv=None):
     else:
         files = [args.input]
 
-    summaries = []
+    summaries, failed = [], []
     for f in files:
         out_dir = args.out_dir or os.path.dirname(os.path.abspath(f))
         os.makedirs(out_dir, exist_ok=True)
         try:
             summaries.append(process_one(f, args, cfg, out_dir))
         except Exception as e:
-            print(f"  ERROR processing {f}: {e}")
+            failed.append((f, e))
+            print(f"  ERROR processing {os.path.basename(f)}: {e}")
 
     if len(files) > 1 and summaries:
         out_dir = args.out_dir or os.path.dirname(os.path.abspath(files[0]))
@@ -1149,6 +1162,11 @@ def main(argv=None):
         print(f"\nWrote combined summary across {len(summaries)} sessions: {combined_path}")
         print(combined.to_string(index=False))
 
+    # Report failure through the exit code as well as the log, so a broken CSV cannot slip
+    # through a batch run unnoticed.
+    if failed:
+        print(f"\n{len(failed)} of {len(files)} file(s) could not be processed.")
+        return 1
     return 0
 
 

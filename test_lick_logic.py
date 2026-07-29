@@ -274,6 +274,44 @@ def test_explicit_trim_overrides():
     assert [x["accepted"] for x in r2["assess"]] == [True, True, False]
 
 
+def test_quality_report_flags_bad_tracking_and_stays_quiet_on_good():
+    """The script has to say when the tracking is too poor to judge the model by.
+
+    A model run on footage unlike its training set can miss the spout entirely or hold a
+    "tongue" on a bright patch for many seconds. Both would otherwise produce a confident zero.
+    """
+    from detect_anticipatory_licks import report_input_quality
+    cfg = dict(DEFAULTS)
+
+    good = make_df(20000, extensions=[(s, s + 180) for s in (2000, 8000, 14000)],
+                   tongue_runs=[(1900, 1906), (1920, 1926), (2100, 2130)])
+    assert report_input_quality(good, cfg) == [], report_input_quality(good, cfg)
+
+    # spout never tracked -> no trial can ever be found, and that must be said out loud
+    no_spout = good.copy()
+    no_spout["spout_tip.score"] = 0.0
+    no_spout["spout_tip.x"] = np.nan
+    assert any("spout_tip" in w for w in report_input_quality(no_spout, cfg))
+
+    # a tongue stuck on for 30s, and on most of the session
+    stuck = good.copy()
+    stuck.loc[5000:23000, "tongue.score"] = 0.9
+    stuck.loc[5000:23000, "tongue.x"] = 150.0
+    stuck.loc[5000:23000, "tongue.y"] = 90.0
+    w = report_input_quality(stuck, cfg)
+    assert any("unbroken tongue" in x for x in w), w
+    assert any("far more than a mouse actually licks" in x for x in w), w
+
+    # no tongue at all
+    none_df = good.copy()
+    none_df["tongue.score"] = 0.0
+    none_df["tongue.x"] = np.nan
+    assert any("no tongue was detected" in x for x in report_input_quality(none_df, cfg))
+
+    # an undersampled recording cannot resolve licks whatever the model does
+    assert any("fps" in x for x in report_input_quality(good, {**cfg, "fps": 15.0}))
+
+
 def test_csv_is_the_only_required_input():
     """The analysis CSV must be enough on its own.
 

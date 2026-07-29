@@ -152,6 +152,24 @@ bout the spout should be sitting at R with a real tongue under the red dot.
 Swapping in `--class other` shows what the trial filter threw out, which is a quick way to sanity
 check the split.
 
+## It tells you when the tracking is not good enough
+
+A model asked to run on footage unlike what it was trained on can miss a body part entirely, or
+lock onto a bright patch and call it a tongue for twenty seconds straight. Either way the honest
+answer is that nothing can be concluded, which is a lot more useful than a confident zero.
+
+So before anything else the script checks the tracking and says what is wrong with it. It flags a
+spout that is barely tracked, since without the spout there is no way to know when reward was
+available and no trial can be found at all. It flags a tongue reported on an implausible share of
+the session, a tongue held unbroken for longer than any real bout of licking, a tongue never
+found at all, and a frame rate too low to separate individual licks.
+
+That last one is worth knowing about. Mice lick at roughly seven per second with the tongue out
+for something like a tenth of a second. At sixty frames per second a lick covers about six
+frames, which is plenty. At fifteen it covers about one and a half, and a whole lick cycle covers
+about two, so individual licks stop being separable no matter how good the model gets. Anything
+under about twenty frames per second is not worth scoring per lick.
+
 ## How it holds up on real sessions
 
 Three sessions from different mice, recorded at three different resolutions (960x600, 800x500
@@ -182,7 +200,7 @@ anticipatory count comes from.
 python test_lick_logic.py
 ```
 
-Twenty one tests. Most of them build small fake sessions where the right answer is known and
+Twenty two tests. Most of them build small fake sessions where the right answer is known and
 check the labelling exactly, covering licking that crosses an extension, licking left over from
 the previous trial, extensions broken into fragments by tracking dropout, sessions with no
 rewards in them at all, lone single licks scattered between trials, and a setup placement that

@@ -97,6 +97,7 @@ DEFAULTS = dict(
     trim_end_s=None,          # optional: ignore extensions in the last N s (auto if None)
     outlier_lo=0.5,           # flag trials whose duration < this * median duration
     outlier_hi=2.0,           # flag trials whose duration > this * median duration
+    max_plausible_tongue_s=4.0,  # a longer unbroken tongue detection is a stuck false positive
 )
 
 NODES = ["nose", "tongue", "spout_tip", "left_paw", "right_paw"]
@@ -417,6 +418,57 @@ def assess_trials(trials, cfg, n_frames):
             accepted=bool(not outlier[i] and not outside),
         ))
     return out
+
+
+def report_input_quality(df: pd.DataFrame, cfg: dict):
+    """Sanity-check the tracking before drawing conclusions from it.
+
+    The point of this script is to show how well the model picks up anticipatory licking, so it
+    has to be able to say when the model's output is not good enough to judge. A model run on
+    footage unlike its training set can miss a node completely, or lock onto a bright patch and
+    call it a tongue for many seconds together. Either way the answer would be a confident zero,
+    which is worse than a complaint.
+
+    Returns a list of warning strings.
+    """
+    n = len(df)
+    warn = []
+    fps = cfg["fps"]
+
+    # Sampling rate. Mice lick at roughly 7 Hz with the tongue out for about 60-100 ms, so
+    # below ~20 fps a single lick barely spans one frame and individual licks stop being
+    # separable no matter how good the model is.
+    if fps < 20:
+        warn.append(f"{fps:.0f} fps gives {1000/fps:.0f} ms per frame, so a ~100 ms lick spans "
+                    f"~{100/(1000/fps):.1f} frames. Individual licks cannot be resolved "
+                    f"reliably below about 20 fps")
+
+    for node, floor in (("spout_tip", 0.50), ("nose", 0.50), ("tongue", 0.0)):
+        frac = float((df[f"{node}.score"].fillna(0) > cfg["tongue_score_min"]).mean())
+        if node != "tongue" and frac < floor:
+            warn.append(f"{node} is tracked on only {100*frac:.1f}% of frames"
+                        + (" -- without the spout there is no way to tell when reward was "
+                           "available, so no trial can be found" if node == "spout_tip" else ""))
+
+    ts = df["tongue.score"].fillna(0).to_numpy()
+    hit = ts > cfg["tongue_score_min"]
+    frac = float(hit.mean())
+    if frac > 0.10:
+        warn.append(f"tongue is reported on {100*frac:.0f}% of all frames, which is far more "
+                    f"than a mouse actually licks (a few percent at most). Expect heavy "
+                    f"false positives")
+    if hit.any():
+        longest = max(e - s for s, e in _mask_runs(hit))
+        # Drinking through a whole reward window can keep the tongue in view for a couple of
+        # seconds, so only flag runs well past that.
+        if longest / fps > cfg["max_plausible_tongue_s"]:
+            warn.append(f"longest unbroken tongue detection lasts {longest/fps:.1f}s "
+                        f"({longest} frames), which is far longer than any real bout of licking "
+                        f"keeps the tongue in view. The model is holding onto something that is "
+                        f"not a tongue")
+    elif n:
+        warn.append("no tongue was detected anywhere in this recording")
+    return warn
 
 
 def session_bounds(df: pd.DataFrame, reg: SpoutRegions, trials, accepted, cfg, n: int):
@@ -945,6 +997,13 @@ def process_one(csv_path: str, args, cfg: dict, out_dir: str) -> dict:
     stem = os.path.splitext(os.path.basename(csv_path))[0]
     print(f"\n=== {stem} ===")
     df = load_sleap_csv(csv_path)
+
+    problems = report_input_quality(df, cfg)
+    if problems:
+        print(f"  DATA QUALITY -- {len(problems)} concern(s) with this tracking:")
+        for w in problems:
+            print(f"    * {w}")
+        print("    Results below are only as good as the tracking above.")
 
     reg = learn_spout_regions(df, cfg,
                               ret_override=args.retracted_region,

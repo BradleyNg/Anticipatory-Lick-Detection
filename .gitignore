@@ -17,6 +17,10 @@ modelTongueSample*.png
 review_*.png
 *_diagnostics.png
 
+# Hand scoring workspace. Holds exported video frames and the scores derived from
+# them, so it is unpublished experiment data like everything else above.
+handscore/
+
 # Script output
 *_anticipatory_licks.csv
 *_anticipatory_bouts.csv

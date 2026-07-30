@@ -200,7 +200,7 @@ anticipatory count comes from.
 python test_lick_logic.py
 ```
 
-Twenty two tests. Most of them build small fake sessions where the right answer is known and
+Twenty four tests. Most of them build small fake sessions where the right answer is known and
 check the labelling exactly, covering licking that crosses an extension, licking left over from
 the previous trial, extensions broken into fragments by tracking dropout, sessions with no
 rewards in them at all, lone single licks scattered between trials, and a setup placement that
@@ -214,6 +214,19 @@ Recordings, tracking exports and anything the scripts write are kept out of the 
 .gitignore. They are large and they are not mine to publish. The tests that need a session CSV
 say so loudly and skip when it is absent, rather than quietly reporting a pass, so the rest of
 the suite still runs on a fresh clone.
+
+## Rewards close together
+
+Rewards sometimes arrive close together, the spout retracting and going straight back out a few
+seconds later. Licking in a gap like that is anticipating the reward about to arrive, not
+finishing the one just given, so the clean-up window must not be allowed to eat it. Two things
+prevent that. Licking that runs into the next extension is flagged as a lead-in and outranks the
+clean-up carve, and the carve is separately capped at `--post-reward-max-frac` of the distance to
+the next reward, which covers the case where the lead-in reach is set shorter than the clean-up
+window.
+
+Worth knowing that a long parked stretch at the head of a recording is not a reward, so the gap
+after it is not clean-up either and licking there counts as anticipatory in full.
 
 ## Tuning
 

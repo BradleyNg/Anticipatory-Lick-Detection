@@ -178,6 +178,64 @@ def test_post_retraction_not_absorbed():
     assert labels_of(r, 790, 795) == {"anticipatory"}
 
 
+def test_short_gap_between_rewards_keeps_anticipatory_licks():
+    """The spout can retract and come straight back out, and the licks in that short gap are
+    anticipating the next reward rather than finishing the last one.
+
+    Two separate things protect them. Licking that runs into the next extension is flagged as a
+    lead-in and beats the clean-up carve, which covers the gap whenever the lead-in reach is as
+    long as the clean-up window. The carve is additionally capped at a share of the distance to
+    the next extension, which is what protects a lick when the lead-in reach is configured
+    shorter than the clean-up window.
+    """
+    # two real rewards 2 s apart, shorter than post_reward_s, with licking through the gap
+    df = make_df(20000, extensions=[(2000, 2180), (2240, 2420), (10000, 10180)],
+                 tongue_runs=[(2200, 2206), (2225, 2231)])
+    r = run_pipeline(df)
+    assert len(r["trials"]) == 3, r["trials"]
+    assert labels_of(r, 2225, 2231) == {"anticipatory"}, labels_of(r, 2225, 2231)
+
+    # with a short lead-in reach the cap is the only thing standing between a mid-gap lick and
+    # being written off as clean-up
+    df2 = make_df(20000, extensions=[(2000, 2180), (2360, 2540), (10000, 10180)],
+                  tongue_runs=[(2280, 2286)])
+    kw = dict(anticipatory_max_gap=30)
+    assert labels_of(run_pipeline(df2, **kw), 2280, 2286) == {"anticipatory"}
+    assert labels_of(run_pipeline(df2, post_reward_max_frac=1.0, **kw),
+                     2280, 2286) == {"post_reward"}
+
+    # a long gap is unaffected, clean-up still gets its full window
+    df3 = make_df(20000, extensions=[(2000, 2180), (12000, 12180)],
+                  tongue_runs=[(2200, 2206), (2400, 2406)])
+    r3 = run_pipeline(df3)
+    assert labels_of(r3, 2200, 2206) == {"post_reward"}
+    assert labels_of(r3, 2400, 2406) == {"anticipatory"}
+
+
+def test_licks_after_a_parked_spout_period_are_anticipatory():
+    """Mirrors the real F19_F17 session structure.
+
+    That recording opens with the spout parked out for about 31 s, retracts for about 9 s during
+    which the mouse licks, then delivers a normal ~3 s reward. The parked stretch is not a
+    reward, so nothing in the gap after it is reward clean-up and every lick there is
+    anticipating the extension that follows.
+    """
+    fps = 30.0
+    park = (int(1.0 * fps), int(30.8 * fps))          # ~30 s parked, an off-protocol placement
+    rewards = [(int(39.9 * fps), int(42.9 * fps)),
+               (int(65.8 * fps), int(68.7 * fps)),
+               (int(95.0 * fps), int(98.0 * fps))]
+    licks = [(int(t * fps), int(t * fps) + 3) for t in (31.5, 33.0, 34.2, 35.5, 36.4, 37.1,
+                                                        38.0, 39.2)]
+    df = make_df(int(120 * fps), extensions=[park] + rewards, tongue_runs=licks)
+    r = run_pipeline(df, fps=fps)
+    assert not r["accepted"][0], "the 30 s parked stretch must not count as a reward"
+    assert all(r["accepted"][1:]), r["accepted"]
+    got = [p.onset_frame for p in r["prots"] if p.label == "anticipatory"]
+    assert len(got) == len(licks), (len(got), len(licks))
+    assert all(p.trial_id == 2 for p in r["prots"] if p.label == "anticipatory")
+
+
 def test_post_reward_licking_separated():
     """Licking immediately after the spout retracts is reward clean-up, not anticipation,
     but licking later in the same gap is anticipatory again."""

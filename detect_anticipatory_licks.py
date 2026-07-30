@@ -90,6 +90,8 @@ DEFAULTS = dict(
     anticipatory_max_gap=120, # max gap from last lick to the extension onset to count as lead-in
     post_reward_s=2.0,        # licking within this long after a retraction is reward clean-up,
                               # not anticipation. Set to 0 to count it as anticipatory.
+    post_reward_max_frac=0.5, # but never let clean-up claim more than this share of the gap to
+                              # the next reward, so a short gap still yields anticipatory licks
     min_extended_frac=0.002,  # an extended region must hold >= this frac of spout points
     min_extension_s=None,     # optional: drop extensions shorter than this many seconds
     max_extension_s=None,     # optional: drop extensions longer than this many seconds
@@ -720,9 +722,21 @@ def label_licks(n: int, trials, windows, cfg, accepted=None, bounds=None):
         lead[a:b] = labels[a:b] == "anticipatory"
 
     # Reward clean-up licking is not anticipation, so carve it back out.
+    #
+    # The window has to shrink when rewards come close together. The rig sometimes retracts the
+    # spout and sends it straight back out a few seconds later, and the mouse licks in that
+    # short gap. A fixed clean-up window would swallow most of the gap, or all of it once the
+    # gap is shorter than the window, and those licks would be filed as clean-up and dropped
+    # even though they are plainly anticipating the reward that is about to arrive. So cap the
+    # window at a fraction of the distance to the next extension. The sooner the next reward
+    # lands, the less of that gap can be explained as finishing the last one.
     if pr > 0:
-        for ti, s, e in acc:
-            stop = min(e + pr, n)
+        for k, (ti, s, e) in enumerate(acc):
+            nxt = acc[k + 1][1] if k + 1 < len(acc) else hi
+            win = int(min(pr, cfg["post_reward_max_frac"] * max(nxt - e, 0)))
+            if win <= 0:
+                continue
+            stop = min(e + win, n)
             seg = labels[e:stop]
             mask = (seg == "anticipatory") & ~lead[e:stop]
             seg[mask] = "post_reward"

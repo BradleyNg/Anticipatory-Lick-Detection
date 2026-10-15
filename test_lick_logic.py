@@ -26,6 +26,7 @@ from detect_anticipatory_licks import (
     DEFAULTS, load_sleap_csv, learn_spout_regions, find_extension_events,
     derive_anticipatory_windows, label_licks, clean_tongue,
     extract_protrusions_and_bouts, assess_trials, session_bounds, is_output_file,
+    FRAME_PARAMS, resolve_frame_params,
 )
 
 RETRACTED = (100.0, 100.0)
@@ -264,6 +265,42 @@ def test_short_blip_dropped():
     r = run_pipeline(df)
     assert len(r["trials"]) == 1, r["trials"]
     assert r["trials"][0] == (2000, 2180)
+
+
+def test_frame_params_follow_fps():
+    """Frame-count settings are durations: the old defaults at 60 fps, halved at 30 fps."""
+    at60 = resolve_frame_params(dict(DEFAULTS, fps=60.0))
+    assert {k: at60[k] for k in FRAME_PARAMS} == {k: DEFAULTS[k] for k in FRAME_PARAMS}
+    at30 = resolve_frame_params(dict(DEFAULTS, fps=30.0))
+    assert {k: at30[k] for k in FRAME_PARAMS} == dict(
+        min_protrusion_frames=1, bout_gap_frames=10, min_extended_run=3,
+        extension_merge_gap=15, lick_episode_gap=60, anticipatory_max_gap=60)
+    pinned = resolve_frame_params(dict(DEFAULTS, fps=30.0), explicit={"min_protrusion_frames": 2})
+    assert pinned["min_protrusion_frames"] == 2 and pinned["bout_gap_frames"] == 10
+
+
+def test_single_frame_lick_kept_at_30fps():
+    """At 30 fps a lick can show the tongue for a single frame; it must survive the blip filter."""
+    df = make_df(3000, extensions=[(1000, 1090)], tongue_runs=[(980, 981), (1030, 1031)])
+    at60 = run_pipeline(df)  # 60 fps defaults: a run must last 2 frames, so these are dropped
+    assert not at60["valid"][980] and not at60["valid"][1030]
+    cfg30 = resolve_frame_params(dict(DEFAULTS, fps=30.0))
+    at30 = run_pipeline(df, fps=30.0, **{k: cfg30[k] for k in FRAME_PARAMS})
+    assert at30["valid"][980] and at30["valid"][1030]
+
+
+def test_onset_at_spout_motion():
+    """A trial starts when the spout leaves rest, so licks at the incoming spout are not anticipatory."""
+    df = make_df(3000, extensions=[(1000, 1180)], tongue_runs=[(900, 905), (994, 998)])
+    for i, f in enumerate(range(990, 1000)):  # the spout travels out over frames 990-999
+        df.loc[f, "spout_tip.x"] = RETRACTED[0] + (i + 1) / 11 * (EXTENDED[0] - RETRACTED[0])
+        df.loc[f, "spout_tip.y"] = RETRACTED[1]
+    a = run_pipeline(df, extension_onset="arrival")
+    m = run_pipeline(df, extension_onset="motion")
+    assert a["trials"][0][0] == 1000 and m["trials"][0][0] == 990, (a["trials"], m["trials"])
+    assert labels_of(a, 994, 998) == {"anticipatory"}   # old behaviour: licks at the moving spout
+    assert labels_of(m, 994, 998) == {"consummatory"}
+    assert labels_of(m, 900, 905) == {"anticipatory"}   # licking before the spout moves is unaffected
 
 
 def test_no_extensions_all_other():
@@ -580,6 +617,22 @@ EXPECTED = {
         anti_prot=730, anti_lead=44, anti_solo=309),
 }
 
+# The same sessions with trials starting when the spout leaves rest (the default since
+# extension_onset="motion"). Spout regions and trial counts are unchanged; onsets move 4-6 frames
+# earlier, so licks at the incoming spout stop counting as anticipatory. EXPECTED above stays
+# pinned to extension_onset="arrival", which reproduces the original behaviour exactly.
+EXPECTED_MOTION = {
+    "260728_225759": dict(detected=15, accepted=14, leadin=12, window_median=190,
+        counts={"anticipatory": 490, "consummatory": 831, "post_reward": 79, "other": 181},
+        anti_prot=129, anti_lead=111, anti_solo=18),
+    "260728_232648": dict(detected=18, accepted=13, leadin=2, window_median=72,
+        counts={"anticipatory": 51, "consummatory": 790, "post_reward": 25, "other": 75},
+        anti_prot=20, anti_lead=2, anti_solo=14),
+    "260729_092644": dict(detected=10, accepted=10, leadin=8, window_median=179,
+        counts={"anticipatory": 2356, "consummatory": 1404, "post_reward": 57, "other": 1133},
+        anti_prot=721, anti_lead=35, anti_solo=309),
+}
+
 
 def test_regression_real_csv():
     """Pin the measured numbers on every known real CSV present in the working directory."""
@@ -590,10 +643,10 @@ def test_regression_real_csv():
         print(f"    (SKIPPED, no session CSV present -- looked for {len(EXPECTED)} known exports)")
         return
     print(f"    checking {len(files)} of {len(EXPECTED)} known sessions")
-    for f in files:
+    for f, mode in [(f, m) for f in files for m in ("arrival", "motion")]:
         key = next(k for k in EXPECTED if k in f)
-        exp = EXPECTED[key]
-        r = run_pipeline(load_sleap_csv(f))
+        exp = dict(EXPECTED[key], **(EXPECTED_MOTION[key] if mode == "motion" else {}))
+        r = run_pipeline(load_sleap_csv(f), extension_onset=mode)
         reg = r["reg"]
         assert abs(reg.retracted[0] - exp["ret"][0]) < 1 and abs(reg.retracted[1] - exp["ret"][1]) < 1
         assert abs(reg.extended[0] - exp["ext"][0]) < 1 and abs(reg.extended[1] - exp["ext"][1]) < 1
@@ -616,7 +669,7 @@ def test_regression_real_csv():
         solo = sum(p.isolated and not p.leads_into_reward for p in ap)
         assert lead == exp["anti_lead"], (key, lead)
         assert solo == exp["anti_solo"], (key, solo)
-        print(f"    [{key}] {exp['detected']} detected / {exp['accepted']} accepted "
+        print(f"    [{key} {mode}] {exp['detected']} detected / {exp['accepted']} accepted "
               f"({exp['leadin']} lead-in), {counts}, {len(ap)} anticipatory licks "
               f"({lead} lead-in, {solo} lone singles)")
 

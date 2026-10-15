@@ -82,12 +82,21 @@ DEFAULTS = dict(
     spout_calib_score_min=0.6,  # min score for points used to LEARN the regions
     tongue_score_min=0.30,    # model-confidence gate for a real tongue (camera-independent)
     tongue_roi_k=8.0,         # tongue ROI: reject if nose-relative dist > median + k*MAD
+    # Frame-count settings. These are the 60 fps values; the CLI re-derives them from the
+    # *_s durations below at the actual --fps (see FRAME_PARAMS), so a 30 fps video gets the
+    # same timing rather than doubled windows.
     min_protrusion_frames=2,  # a tongue run must persist >= this many frames (kill blips)
     bout_gap_frames=20,       # merge protrusions <= this many frames apart into one bout
     min_extended_run=5,       # an extension must persist >= this many frames (OPEN)
     extension_merge_gap=30,   # bridge extended runs <= this many frames apart (CLOSE)
     lick_episode_gap=120,     # licks <= this many frames apart are one licking episode (2s)
     anticipatory_max_gap=120, # max gap from last lick to the extension onset to count as lead-in
+    min_protrusion_s=2 / 60,     # 33 ms
+    bout_gap_s=20 / 60,          # 0.33 s
+    min_extended_s=5 / 60,       # 83 ms
+    extension_merge_gap_s=0.5,
+    lick_episode_gap_s=2.0,
+    anticipatory_max_gap_s=2.0,
     post_reward_s=2.0,        # licking within this long after a retraction is reward clean-up,
                               # not anticipation. Set to 0 to count it as anticipatory.
     post_reward_max_frac=0.5, # but never let clean-up claim more than this share of the gap to
@@ -100,9 +109,40 @@ DEFAULTS = dict(
     outlier_lo=0.5,           # flag trials whose duration < this * median duration
     outlier_hi=2.0,           # flag trials whose duration > this * median duration
     max_plausible_tongue_s=4.0,  # a longer unbroken tongue detection is a stuck false positive
+    extension_onset="motion",    # trial starts when the spout leaves rest ("motion") or when it
+                                 # reaches the reward position ("arrival", the original behaviour)
+    onset_lookback_s=0.5,        # how far back from arrival to look for the spout leaving rest
 )
 
 NODES = ["nose", "tongue", "spout_tip", "left_paw", "right_paw"]
+
+# Each frame-count setting and the duration it stands for.
+FRAME_PARAMS = {
+    "min_protrusion_frames": "min_protrusion_s",
+    "bout_gap_frames": "bout_gap_s",
+    "min_extended_run": "min_extended_s",
+    "extension_merge_gap": "extension_merge_gap_s",
+    "lick_episode_gap": "lick_episode_gap_s",
+    "anticipatory_max_gap": "anticipatory_max_gap_s",
+}
+
+
+def frames_for(seconds: float, fps: float) -> int:
+    """Duration -> whole frames (round half up, at least 1). Exact at 60 fps: 2/60 s -> 2."""
+    return max(1, int(np.floor(seconds * fps + 0.5 + 1e-9)))
+
+
+def resolve_frame_params(cfg: dict, explicit: dict | None = None) -> dict:
+    """Fill every frame-count setting from its duration at cfg['fps'].
+
+    `explicit` holds frame counts the user set by hand; those win. At 60 fps this reproduces the
+    original defaults exactly; at 30 fps a lick visible for a single frame is no longer dropped.
+    """
+    out = dict(cfg)
+    for fkey, skey in FRAME_PARAMS.items():
+        given = (explicit or {}).get(fkey)
+        out[fkey] = int(given) if given is not None else frames_for(out[skey], out["fps"])
+    return out
 
 # Everything this script writes. The names keep the source stem, which itself contains
 # "analysis", so they match the same glob the inputs do and would otherwise be re-ingested on a
@@ -337,6 +377,29 @@ def _mask_runs(mask: np.ndarray):
     return list(zip(s, e))
 
 
+def _onset_at_motion(trials, sx, sy, sc, reg: SpoutRegions, cfg: dict):
+    """Move each extension onset back from when the spout ARRIVES to when it LEAVES rest.
+
+    The detector sees an extension once the spout sits at the reward position, but the rig starts
+    it moving 150-200 ms earlier and the mouse is already licking the incoming spout. Measured on
+    a 30 fps session against the rig log, arrival-based onsets ran a steady 4-6 frames late and
+    left 7-8% of "anticipatory" licks either starting after the logged extension or touching the
+    spout. Reward is no longer being anticipated once the spout is on its way, so the onset goes
+    right after the last confident at-rest frame, searching back at most `onset_lookback_s` and
+    never into the previous trial. Uses the learned rest radius, so it is camera-independent.
+    """
+    at_rest = (_dist(sx, sy, reg.retracted[0], reg.retracted[1]) <= reg.radius) & \
+              (sc >= cfg["spout_score_min"]) & np.isfinite(sx)
+    look = frames_for(cfg.get("onset_lookback_s", 0.5), cfg["fps"])
+    out, prev_end = [], 0
+    for s, e in trials:
+        lo = max(prev_end, s - look)
+        rest = np.flatnonzero(at_rest[lo:s])
+        out.append((lo + int(rest[-1]) + 1 if len(rest) else s, e))  # no rest frame seen: keep arrival
+        prev_end = e
+    return out
+
+
 def find_extension_events(df: pd.DataFrame, reg: SpoutRegions, cfg: dict):
     """Find the spout-extension events (reward trials) as [onset, offset) index intervals.
 
@@ -362,6 +425,8 @@ def find_extension_events(df: pd.DataFrame, reg: SpoutRegions, cfg: dict):
     # extended than to retracted". Recordings contain other spout placements (setup, hand
     # adjustment); a nearest-of-two rule would sweep those in as rewards.
     trials = _runs_at(sx, sy, sc, reg.extended, reg.radius, cfg)   # CLOSE then OPEN
+    if cfg.get("extension_onset", "motion") == "motion":
+        trials = _onset_at_motion(trials, sx, sy, sc, reg, cfg)
 
     # optional duration gate -- the rig extends the spout for a fixed time (~3s on the sample),
     # so wildly off-duration "extensions" are artifacts (e.g. the spout parked out before the
@@ -1142,18 +1207,27 @@ def build_argparser():
     p.add_argument("--spout-score-min", type=float, default=DEFAULTS["spout_score_min"])
     p.add_argument("--tongue-score-min", type=float, default=DEFAULTS["tongue_score_min"])
     p.add_argument("--tongue-roi-k", type=float, default=DEFAULTS["tongue_roi_k"])
-    p.add_argument("--min-protrusion-frames", type=int, default=DEFAULTS["min_protrusion_frames"])
-    p.add_argument("--bout-gap-frames", type=int, default=DEFAULTS["bout_gap_frames"])
-    p.add_argument("--min-extended-run", type=int, default=DEFAULTS["min_extended_run"],
-                   help="min frames for a real spout extension (OPEN)")
-    p.add_argument("--extension-merge-gap", type=int, default=DEFAULTS["extension_merge_gap"],
-                   help="bridge extended runs this many frames apart, fixing detector flicker (CLOSE)")
-    p.add_argument("--lick-episode-gap", type=int, default=DEFAULTS["lick_episode_gap"],
+    # Frame-count options default to None: derived from their durations at --fps (33 ms, 0.33 s,
+    # 83 ms, 0.5 s, 2 s, 2 s). Pass a number to pin the frame count instead.
+    p.add_argument("--min-protrusion-frames", type=int, default=None,
+                   help="min frames a tongue run must last (default: 33 ms at --fps)")
+    p.add_argument("--bout-gap-frames", type=int, default=None,
+                   help="merge protrusions this many frames apart into one bout (default: 0.33 s)")
+    p.add_argument("--min-extended-run", type=int, default=None,
+                   help="min frames for a real spout extension, OPEN (default: 83 ms)")
+    p.add_argument("--extension-merge-gap", type=int, default=None,
+                   help="bridge extended runs this many frames apart, fixing detector flicker, "
+                        "CLOSE (default: 0.5 s)")
+    p.add_argument("--lick-episode-gap", type=int, default=None,
                    help="licks within this many frames are one episode; defines 'when the "
-                        "mouse starts licking' (default 120 = 2s @60fps)")
-    p.add_argument("--anticipatory-max-gap", type=int, default=DEFAULTS["anticipatory_max_gap"],
+                        "mouse starts licking' (default: 2 s)")
+    p.add_argument("--anticipatory-max-gap", type=int, default=None,
                    help="max frames from the last lick to the extension onset for the trial "
-                        "to count as having an anticipatory lead-in")
+                        "to count as having an anticipatory lead-in (default: 2 s)")
+    p.add_argument("--extension-onset", choices=["motion", "arrival"], default=DEFAULTS["extension_onset"],
+                   help="where a reward trial starts: when the spout leaves rest (motion, default) or "
+                        "when it reaches the reward position (arrival, the original behaviour). Licks "
+                        "at the incoming spout count as anticipatory under 'arrival'")
     p.add_argument("--post-reward-s", type=float, default=DEFAULTS["post_reward_s"],
                    help="licking within this many seconds after the spout retracts is reward "
                         "clean-up rather than anticipation. Use 0 to count it as anticipatory")
@@ -1191,17 +1265,15 @@ def main(argv=None):
     args = build_argparser().parse_args(argv)
 
     cfg = dict(DEFAULTS)
-    cfg.update(fps=args.fps, spout_score_min=args.spout_score_min,
+    cfg.update(fps=args.fps, spout_score_min=args.spout_score_min, extension_onset=args.extension_onset,
                tongue_score_min=args.tongue_score_min, tongue_roi_k=args.tongue_roi_k,
-               min_protrusion_frames=args.min_protrusion_frames,
-               bout_gap_frames=args.bout_gap_frames, min_extended_run=args.min_extended_run,
-               extension_merge_gap=args.extension_merge_gap,
-               lick_episode_gap=args.lick_episode_gap,
-               anticipatory_max_gap=args.anticipatory_max_gap,
                post_reward_s=args.post_reward_s,
                min_extension_s=args.min_extension_s,
                max_extension_s=args.max_extension_s,
                trim_start_s=args.trim_start_s, trim_end_s=args.trim_end_s)
+    # frame counts follow the video's frame rate unless set explicitly on the command line
+    cfg = resolve_frame_params(cfg, explicit={k: getattr(args, k) for k in FRAME_PARAMS})
+    print(f"timing at {cfg['fps']:g} fps: " + ", ".join(f"{k}={cfg[k]}" for k in FRAME_PARAMS))
     # try to coerce lick_code to int if it looks numeric
     if args.lick_code is not None:
         try:

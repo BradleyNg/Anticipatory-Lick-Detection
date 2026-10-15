@@ -178,15 +178,46 @@ and 640x400) and all at sixty frames per second.
 |  | F19_F18 | M13_M22 | M15_F16 |
 |---|---|---|---|
 | extensions found, then accepted | 15, 14 | 18, 13 | 10, 10 |
-| accepted trial length | 2.93 to 2.98s | 2.87 to 2.98s | 2.90 to 2.93s |
-| anticipatory licks | 134 | 23 | 730 |
-| in a run leading into a reward | 116 | 5 | 44 |
+| accepted trial length | 2.98 to 3.07s | 2.97 to 3.03s | 3.00 to 3.03s |
+| anticipatory licks | 129 | 20 | 721 |
+| in a run leading into a reward | 111 | 2 | 35 |
 | lone single licks between trials | 18 | 14 | 309 |
 
 The check worth trusting is the spout itself. Across all three sessions it sits at the learned
 reward position on **100 percent** of the frames inside an accepted trial, and back at rest on
-95 to 99.8 percent of the frames outside one. Accepted trial lengths land between 2.87 and 2.98
-seconds everywhere, which is the rig repeating one fixed action.
+95 to 99.8 percent of the frames outside one. Accepted trial lengths land between 2.97 and 3.07
+seconds everywhere, which is the rig repeating one fixed action: the logs program a 3.00 s
+extension.
+
+These numbers start each trial when the spout leaves rest (see "When a trial starts" below). With
+`--extension-onset arrival`, the original behaviour, the same sessions give 134, 23 and 730
+anticipatory licks and trial lengths of 2.87 to 2.98 s, short by the time the spout takes to
+travel.
+
+## When a trial starts
+
+A trial used to start when the spout reached the reward position. The rig starts moving it 150
+to 200 ms earlier, though, and the mouse is often already licking the spout on its way in. Those
+licks were counted as anticipatory even when the tongue touched the spout. On a 30 fps session
+checked against the rig log, arrival-based onsets ran a steady 4 to 6 frames late, and 7 to 8
+percent of the "anticipatory" licks either began after the logged extension or set off the touch
+sensor.
+
+So a trial now starts right after the last frame the spout was still at rest, which puts the
+onset within about 2 frames of the logged extension and drops those impossible licks to 2 to 5
+percent. The remaining gap is about what the motor takes to start moving after the command. The
+rest position and its radius are learned from the video, so this stays camera-independent.
+`--extension-onset arrival` restores the original behaviour.
+
+## Frame rate
+
+The frame-count settings (how long a tongue must be out to count, how close licks must be to
+share a bout, how far back a lead-in can reach, and so on) are durations underneath, and they are
+converted at whatever `--fps` is given. At 60 fps that reproduces the original values exactly. At
+30 fps the shortest licks show the tongue for a single frame, and a fixed two-frame minimum threw
+away close to half of them on one 30 fps session, against the rig's touch sensor. Pass
+`--fps` for every recording that is not 60 fps. Any frame-count option given explicitly on the
+command line still wins.
 
 The three sessions behave very differently, and that is real rather than a fault. M13 hardly
 licks at all except when reward is there. M15 is a progressive ratio session, so its rewards
@@ -200,13 +231,14 @@ anticipatory count comes from.
 python test_lick_logic.py
 ```
 
-Twenty four tests. Most of them build small fake sessions where the right answer is known and
+Twenty seven tests. Most of them build small fake sessions where the right answer is known and
 check the labelling exactly, covering licking that crosses an extension, licking left over from
 the previous trial, extensions broken into fragments by tracking dropout, sessions with no
-rewards in them at all, lone single licks scattered between trials, and a setup placement that
-outweighs the real trials. Two more run the script in an empty directory to prove the CSV is all
-it needs and that a bad CSV fails loudly. The rest cover camera pose and pin the numbers from all
-three real sessions.
+rewards in them at all, lone single licks scattered between trials, a setup placement that
+outweighs the real trials, a spout that takes several frames to travel out, and single-frame
+licks at 30 fps. Two more run the script in an empty directory to prove the CSV is all it needs
+and that a bad CSV fails loudly. The rest cover camera pose, the frame-rate conversion, and pin
+the numbers from all three real sessions under both trial-onset rules.
 
 ## Data files
 
@@ -230,7 +262,8 @@ after it is not clean-up either and licking there counts as anticipatory in full
 
 ## Tuning
 
-Defaults assume sixty frames per second. The ones worth knowing about are `--post-reward-s`,
+Set `--fps` to the recording's frame rate (60 is the default); everything counted in frames
+follows it. The settings worth knowing about are `--post-reward-s`,
 which is how long after a retraction still counts as finishing the reward rather than
 anticipating the next one, and `--tongue-score-min`, which is the SLEAP confidence needed before
 a tongue is believed. Setting `--post-reward-s 0` folds that licking into the anticipatory pile

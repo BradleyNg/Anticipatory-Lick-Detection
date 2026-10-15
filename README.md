@@ -81,6 +81,9 @@ opencv-python, and only if you want to eyeball results against video.
 python detect_anticipatory_licks.py path/to/session.analysis.csv
 ```
 
+The default frame rate is 30 fps, which is what the current rig records. For the 2025 recordings,
+which are 60 fps, add `--fps 60`.
+
 Point it at a folder instead and it works through every analysis CSV inside, then writes a
 combined summary next to them. Files the script has already written get skipped, so running it
 over the same folder twice is safe. A CSV it cannot use is reported and makes the run exit
@@ -173,7 +176,7 @@ under about twenty frames per second is not worth scoring per lick.
 ## How it holds up on real sessions
 
 Three sessions from different mice, recorded at three different resolutions (960x600, 800x500
-and 640x400) and all at sixty frames per second.
+and 640x400) and all at sixty frames per second, so run with `--fps 60`.
 
 |  | F19_F18 | M13_M22 | M15_F16 |
 |---|---|---|---|
@@ -215,8 +218,8 @@ The frame-count settings (how long a tongue must be out to count, how close lick
 share a bout, how far back a lead-in can reach, and so on) are durations underneath, and they are
 converted at whatever `--fps` is given. At 60 fps that reproduces the original values exactly. At
 30 fps the shortest licks show the tongue for a single frame, and a fixed two-frame minimum threw
-away close to half of them on one 30 fps session, against the rig's touch sensor. Pass
-`--fps` for every recording that is not 60 fps. Any frame-count option given explicitly on the
+away close to half of them on one 30 fps session, against the rig's touch sensor. The default
+is 30 fps; pass `--fps` for any recording at another rate. Any frame-count option given explicitly on the
 command line still wins.
 
 The three sessions behave very differently, and that is real rather than a fault. M13 hardly
@@ -262,7 +265,7 @@ after it is not clean-up either and licking there counts as anticipatory in full
 
 ## Tuning
 
-Set `--fps` to the recording's frame rate (60 is the default); everything counted in frames
+Set `--fps` to the recording's frame rate (30 is the default); everything counted in frames
 follows it. The settings worth knowing about are `--post-reward-s`,
 which is how long after a retraction still counts as finishing the reward rather than
 anticipating the next one, and `--tongue-score-min`, which is the SLEAP confidence needed before

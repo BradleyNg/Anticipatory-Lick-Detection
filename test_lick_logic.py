@@ -60,7 +60,8 @@ def make_df(n, extensions=(), tongue_runs=(), tongue_xy=(150.0, 90.0)):
 
 
 def run_pipeline(df, keep_all=False, **over):
-    cfg = dict(DEFAULTS)
+    # The synthetic sessions and the three real exports are 60 fps; the script defaults to 30.
+    cfg = resolve_frame_params(dict(DEFAULTS, fps=60.0))
     cfg.update(over)
     reg = learn_spout_regions(df, cfg)
     trials = find_extension_events(df, reg, cfg)
@@ -268,9 +269,14 @@ def test_short_blip_dropped():
 
 
 def test_frame_params_follow_fps():
-    """Frame-count settings are durations: the old defaults at 60 fps, halved at 30 fps."""
+    """Frame-count settings are durations: the original values at 60 fps, halved at 30 fps."""
     at60 = resolve_frame_params(dict(DEFAULTS, fps=60.0))
-    assert {k: at60[k] for k in FRAME_PARAMS} == {k: DEFAULTS[k] for k in FRAME_PARAMS}
+    assert {k: at60[k] for k in FRAME_PARAMS} == dict(
+        min_protrusion_frames=2, bout_gap_frames=20, min_extended_run=5,
+        extension_merge_gap=30, lick_episode_gap=120, anticipatory_max_gap=120)
+    # the defaults must agree with their own durations at the default frame rate (30 fps)
+    assert DEFAULTS["fps"] == 30.0
+    assert {k: resolve_frame_params(DEFAULTS)[k] for k in FRAME_PARAMS} == {k: DEFAULTS[k] for k in FRAME_PARAMS}
     at30 = resolve_frame_params(dict(DEFAULTS, fps=30.0))
     assert {k: at30[k] for k in FRAME_PARAMS} == dict(
         min_protrusion_frames=1, bout_gap_frames=10, min_extended_run=3,
@@ -376,7 +382,7 @@ def test_quality_report_flags_bad_tracking_and_stays_quiet_on_good():
     "tongue" on a bright patch for many seconds. Both would otherwise produce a confident zero.
     """
     from detect_anticipatory_licks import report_input_quality
-    cfg = dict(DEFAULTS)
+    cfg = resolve_frame_params(dict(DEFAULTS, fps=60.0))  # 60 fps synthetic data
 
     good = make_df(20000, extensions=[(s, s + 180) for s in (2000, 8000, 14000)],
                    tongue_runs=[(1900, 1906), (1920, 1926), (2100, 2130)])
@@ -426,7 +432,7 @@ def test_csv_is_the_only_required_input():
         shutil.copy(script, tmp)
         shutil.copy(sorted(src)[0], os.path.join(tmp, "only.analysis.csv"))
         assert sorted(os.listdir(tmp)) == [script, "only.analysis.csv"]
-        r = subprocess.run([sys.executable, script, "only.analysis.csv"],
+        r = subprocess.run([sys.executable, script, "only.analysis.csv", "--fps", "60"],
                            cwd=tmp, capture_output=True, text=True)
         assert r.returncode == 0, r.stdout + r.stderr
         made = set(os.listdir(tmp)) - {script, "only.analysis.csv"}

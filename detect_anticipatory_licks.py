@@ -77,20 +77,20 @@ import pandas as pd
 # Defaults (all overridable on the command line)
 # --------------------------------------------------------------------------------------
 DEFAULTS = dict(
-    fps=60.0,                 # confirmed by PI for the Cam1 videos
+    fps=30.0,                 # the current rig records at 30 fps; pass --fps 60 for the 2025 videos
     spout_score_min=0.5,      # min spout_tip.score to trust a spout point for state
     spout_calib_score_min=0.6,  # min score for points used to LEARN the regions
     tongue_score_min=0.30,    # model-confidence gate for a real tongue (camera-independent)
     tongue_roi_k=8.0,         # tongue ROI: reject if nose-relative dist > median + k*MAD
-    # Frame-count settings. These are the 60 fps values; the CLI re-derives them from the
-    # *_s durations below at the actual --fps (see FRAME_PARAMS), so a 30 fps video gets the
-    # same timing rather than doubled windows.
-    min_protrusion_frames=2,  # a tongue run must persist >= this many frames (kill blips)
-    bout_gap_frames=20,       # merge protrusions <= this many frames apart into one bout
-    min_extended_run=5,       # an extension must persist >= this many frames (OPEN)
-    extension_merge_gap=30,   # bridge extended runs <= this many frames apart (CLOSE)
-    lick_episode_gap=120,     # licks <= this many frames apart are one licking episode (2s)
-    anticipatory_max_gap=120, # max gap from last lick to the extension onset to count as lead-in
+    # Frame-count settings at the default 30 fps. Each is a duration underneath (the *_s values
+    # below, paired in FRAME_PARAMS), and the CLI re-derives them at whatever --fps is given.
+    # At 60 fps they come out as 2, 20, 5, 30, 120 and 120, the original values.
+    min_protrusion_frames=1,  # a tongue run must persist >= this many frames (kill blips)
+    bout_gap_frames=10,       # merge protrusions <= this many frames apart into one bout
+    min_extended_run=3,       # an extension must persist >= this many frames (OPEN)
+    extension_merge_gap=15,   # bridge extended runs <= this many frames apart (CLOSE)
+    lick_episode_gap=60,      # licks <= this many frames apart are one licking episode (2s)
+    anticipatory_max_gap=60,  # max gap from last lick to the extension onset to count as lead-in
     min_protrusion_s=2 / 60,     # 33 ms
     bout_gap_s=20 / 60,          # 0.33 s
     min_extended_s=5 / 60,       # 83 ms
@@ -1203,7 +1203,8 @@ def build_argparser():
                                  "input the script needs")
     p.add_argument("--out-dir", default=None,
                    help="output directory (default: alongside each input CSV)")
-    p.add_argument("--fps", type=float, default=DEFAULTS["fps"])
+    p.add_argument("--fps", type=float, default=DEFAULTS["fps"],
+                   help="video frame rate (default 30, the current rig; use 60 for the 2025 videos)")
     p.add_argument("--spout-score-min", type=float, default=DEFAULTS["spout_score_min"])
     p.add_argument("--tongue-score-min", type=float, default=DEFAULTS["tongue_score_min"])
     p.add_argument("--tongue-roi-k", type=float, default=DEFAULTS["tongue_roi_k"])

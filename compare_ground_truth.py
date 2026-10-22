@@ -26,6 +26,13 @@ Usage
         --licks <stem>_anticipatory_licks.csv \
         --bouts <stem>_lick_bouts.csv
 
+Hand scoring that marks only where licking starts (one mark for a single lick or a whole bout)
+is matched against bout starts instead:
+
+    python compare_ground_truth.py GROUND_TRUTH.csv \
+        --licks <stem>_anticipatory_bouts.csv --detect-time-col start_s \
+        --bouts <stem>_lick_bouts.csv
+
 Add --offset-scan if the ground truth may be on a different clock than the video.
 """
 
@@ -141,12 +148,15 @@ def main(argv=None):
     ap.add_argument("--licks", required=True, help="<stem>_anticipatory_licks.csv")
     ap.add_argument("--bouts", default=None,
                     help="<stem>_lick_bouts.csv (enables the misclassified-vs-missed diagnostic)")
-    ap.add_argument("--fps", type=float, default=60.0)
+    ap.add_argument("--fps", type=float, default=30.0,
+                    help="video frame rate, used when the hand scores are frame numbers (default 30)")
     ap.add_argument("--gt-time-col", default=None)
     ap.add_argument("--gt-end-col", default=None)
     ap.add_argument("--gt-units", default="auto", choices=["auto", "s", "ms", "frames"])
-    ap.add_argument("--detect-time-col", default="onset_s", choices=["onset_s", "peak_s"],
-                    help="which detected timestamp to match on (default: protrusion onset)")
+    ap.add_argument("--detect-time-col", default="onset_s", choices=["onset_s", "peak_s", "start_s"],
+                    help="which detected timestamp to match on (default: protrusion onset). Use "
+                         "start_s with --licks <stem>_anticipatory_bouts.csv when the hand scoring "
+                         "marks where licking starts (a single lick or a bout) rather than every lick")
     ap.add_argument("--match-tolerance", type=float, default=0.25,
                     help="seconds; a hand score within this of a detection counts as matched")
     ap.add_argument("--offset-scan", action="store_true",
@@ -181,7 +191,8 @@ def main(argv=None):
     print(f"  units       : {unit}  ->  range {gt.min():.2f}-{gt.max():.2f}s "
           f"(video is ~{duration_s:.1f}s)")
     print(f"  rows        : {len(gt)}")
-    print(f"detected     : {len(det)} anticipatory licks from {args.licks}")
+    what = "bouts" if args.detect_time_col == "start_s" else "licks"
+    print(f"detected     : {len(det)} anticipatory {what} from {args.licks}")
 
     # ---------------- period mode ----------------
     if ecol is not None:

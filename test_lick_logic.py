@@ -190,10 +190,12 @@ def test_short_gap_between_rewards_keeps_anticipatory_licks():
     the next extension, which is what protects a lick when the lead-in reach is configured
     shorter than the clean-up window.
     """
+    # the clean-up window is off by default; these checks are about what it may claim when on
+    on = dict(post_reward_s=2.0)
     # two real rewards 2 s apart, shorter than post_reward_s, with licking through the gap
     df = make_df(20000, extensions=[(2000, 2180), (2240, 2420), (10000, 10180)],
                  tongue_runs=[(2200, 2206), (2225, 2231)])
-    r = run_pipeline(df)
+    r = run_pipeline(df, **on)
     assert len(r["trials"]) == 3, r["trials"]
     assert labels_of(r, 2225, 2231) == {"anticipatory"}, labels_of(r, 2225, 2231)
 
@@ -201,7 +203,7 @@ def test_short_gap_between_rewards_keeps_anticipatory_licks():
     # being written off as clean-up
     df2 = make_df(20000, extensions=[(2000, 2180), (2360, 2540), (10000, 10180)],
                   tongue_runs=[(2280, 2286)])
-    kw = dict(anticipatory_max_gap=30)
+    kw = dict(anticipatory_max_gap=30, **on)
     assert labels_of(run_pipeline(df2, **kw), 2280, 2286) == {"anticipatory"}
     assert labels_of(run_pipeline(df2, post_reward_max_frac=1.0, **kw),
                      2280, 2286) == {"post_reward"}
@@ -209,7 +211,7 @@ def test_short_gap_between_rewards_keeps_anticipatory_licks():
     # a long gap is unaffected, clean-up still gets its full window
     df3 = make_df(20000, extensions=[(2000, 2180), (12000, 12180)],
                   tongue_runs=[(2200, 2206), (2400, 2406)])
-    r3 = run_pipeline(df3)
+    r3 = run_pipeline(df3, **on)
     assert labels_of(r3, 2200, 2206) == {"post_reward"}
     assert labels_of(r3, 2400, 2406) == {"anticipatory"}
 
@@ -239,16 +241,16 @@ def test_licks_after_a_parked_spout_period_are_anticipatory():
 
 
 def test_post_reward_licking_separated():
-    """Licking immediately after the spout retracts is reward clean-up, not anticipation,
-    but licking later in the same gap is anticipatory again."""
+    """With the clean-up window on, licking immediately after the spout retracts is reward
+    clean-up, but licking later in the same gap is anticipatory again."""
     df = make_df(4000, extensions=[(500, 680), (2000, 2180)],
                  tongue_runs=[(685, 700),      # right after retraction -> post_reward
                               (1200, 1204)])   # well into the gap -> anticipatory
-    r = run_pipeline(df)
+    r = run_pipeline(df, post_reward_s=2.0)
     assert labels_of(r, 685, 700) == {"post_reward"}
     assert labels_of(r, 1200, 1204) == {"anticipatory"}
-    # with the window switched off it counts as anticipatory instead
-    r0 = run_pipeline(df, post_reward_s=0.0)
+    # by default the window is off: any lick with the spout retracted is anticipatory
+    r0 = run_pipeline(df)
     assert labels_of(r0, 685, 700) == {"anticipatory"}
 
 
@@ -652,7 +654,8 @@ def test_regression_real_csv():
     for f, mode in [(f, m) for f in files for m in ("arrival", "motion")]:
         key = next(k for k in EXPECTED if k in f)
         exp = dict(EXPECTED[key], **(EXPECTED_MOTION[key] if mode == "motion" else {}))
-        r = run_pipeline(load_sleap_csv(f), extension_onset=mode)
+        # pinned with the old 2 s clean-up window, which these counts were measured under
+        r = run_pipeline(load_sleap_csv(f), extension_onset=mode, post_reward_s=2.0)
         reg = r["reg"]
         assert abs(reg.retracted[0] - exp["ret"][0]) < 1 and abs(reg.retracted[1] - exp["ret"][1]) < 1
         assert abs(reg.extended[0] - exp["ext"][0]) < 1 and abs(reg.extended[1] - exp["ext"][1]) < 1

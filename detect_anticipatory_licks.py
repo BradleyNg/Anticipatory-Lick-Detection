@@ -13,13 +13,14 @@ The lick spout physically extends (~1 inch, toward the mouth) only after the mou
 earned a reward, and is retracted otherwise -- so each spout extension marks a reward trial.
 Licks are classified by where they fall in that trial structure:
 
-    [mouse starts licking .... spout EXTENDS)  -> ANTICIPATORY licks
+    spout RETRACTED, during the session        -> ANTICIPATORY licks
     [spout EXTENDS .......... spout RETRACTS)  -> CONSUMMATORY licks
-    any other licking (spout retracted, not    -> 'other': kept in the full bout table but
-     leading into an extension)                   EXCLUDED from the anticipatory outputs
+    before the first / after the last reward   -> 'other': kept in the full bout table but
+     (mounting, spout placement, take-down)       EXCLUDED from the anticipatory outputs
 
-Anticipatory licking is therefore specifically the run that *leads into* a reward, not merely
-any licking that happens while the spout is away.
+This is the lab's definition: any lick while the spout is retracted is anticipatory, though
+most fall in the run that leads into an extension, which every lick flags (`leads_into_reward`).
+`--post-reward-s` can optionally file the licking right after a retraction as reward clean-up.
 
 Cross-camera generalization
 ---------------------------
@@ -97,8 +98,9 @@ DEFAULTS = dict(
     extension_merge_gap_s=0.5,
     lick_episode_gap_s=2.0,
     anticipatory_max_gap_s=2.0,
-    post_reward_s=2.0,        # licking within this long after a retraction is reward clean-up,
-                              # not anticipation. Set to 0 to count it as anticipatory.
+    post_reward_s=0.0,        # licking within this long after a retraction is labelled reward
+                              # clean-up instead of anticipatory. Off, because the lab counts any
+                              # lick with the spout retracted as anticipatory; 2.0 was the old value.
     post_reward_max_frac=0.5, # but never let clean-up claim more than this share of the gap to
                               # the next reward, so a short gap still yields anticipatory licks
     min_extended_frac=0.002,  # an extended region must hold >= this frac of spout points
@@ -739,8 +741,8 @@ def label_licks(n: int, trials, windows, cfg, accepted=None, bounds=None):
     into an extension can still be told apart from a lone spontaneous lick downstream.
 
       consummatory  inside an accepted extension
-      post_reward   within `post_reward_s` of an extension ending (finishing the reward,
-                    so not anticipation). Set --post-reward-s 0 to fold these in.
+      post_reward   within `post_reward_s` of an extension ending (finishing the reward).
+                    Off by default (0 s); --post-reward-s 2 restores the old carve-out.
       anticipatory  spout retracted, inside the active session, everything else
       other         outside the active session, or inside a rejected extension
 
@@ -1230,8 +1232,9 @@ def build_argparser():
                         "when it reaches the reward position (arrival, the original behaviour). Licks "
                         "at the incoming spout count as anticipatory under 'arrival'")
     p.add_argument("--post-reward-s", type=float, default=DEFAULTS["post_reward_s"],
-                   help="licking within this many seconds after the spout retracts is reward "
-                        "clean-up rather than anticipation. Use 0 to count it as anticipatory")
+                   help="label licking within this many seconds after the spout retracts as "
+                        "reward clean-up instead of anticipatory (default 0: any lick with the "
+                        "spout retracted is anticipatory; 2 was the old default)")
     p.add_argument("--min-extension-s", type=float, default=None,
                    help="drop extensions shorter than this (s) -- removes blips")
     p.add_argument("--max-extension-s", type=float, default=None,

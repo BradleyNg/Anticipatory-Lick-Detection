@@ -13,9 +13,10 @@ and it pulls back afterward. Every extension is therefore a reward trial, and li
 by where they land around one.
 
 A lick counts as anticipatory whenever the spout is pulled back during the session, since no
-reward is available at that moment. Licking while the spout is out is consummatory. Licking in
-the couple of seconds right after the spout retracts is treated separately as post reward,
-because the mouse is finishing what it just earned rather than anticipating anything.
+reward is available at that moment. That is the lab's definition, and it includes the licking
+right after the spout retracts. Licking while the spout is out is consummatory. If you would
+rather treat the couple of seconds after a retraction as the mouse finishing its reward,
+`--post-reward-s 2` files that licking separately as post reward (this used to be the default).
 
 Bout size is never used as a filter. The mouse often licks once between trials without working
 up to a proper run, and a lone lick like that is still a lick made with no reward available, so
@@ -254,7 +255,8 @@ the suite still runs on a fresh clone.
 
 Rewards sometimes arrive close together, the spout retracting and going straight back out a few
 seconds later. Licking in a gap like that is anticipating the reward about to arrive, not
-finishing the one just given, so the clean-up window must not be allowed to eat it. Two things
+finishing the one just given, so when the clean-up window is switched on (`--post-reward-s`
+above 0) it must not be allowed to eat it. Two things
 prevent that. Licking that runs into the next extension is flagged as a lead-in and outranks the
 clean-up carve, and the carve is separately capped at `--post-reward-max-frac` of the distance to
 the next reward, which covers the case where the lead-in reach is set shorter than the clean-up
@@ -267,9 +269,8 @@ after it is not clean-up either and licking there counts as anticipatory in full
 
 Set `--fps` to the recording's frame rate (30 is the default); everything counted in frames
 follows it. The settings worth knowing about are `--post-reward-s`,
-which is how long after a retraction still counts as finishing the reward rather than
-anticipating the next one, and `--tongue-score-min`, which is the SLEAP confidence needed before
-a tongue is believed. Setting `--post-reward-s 0` folds that licking into the anticipatory pile
-instead. There is also `--lick-episode-gap`, which only decides where a lead-in run is judged to
+which is how long after a retraction counts as finishing the reward rather than anticipating
+the next one (0 by default, so none of it), and `--tongue-score-min`, which is the SLEAP
+confidence needed before a tongue is believed. There is also `--lick-episode-gap`, which only decides where a lead-in run is judged to
 begin and no longer affects which licks are counted. Run any of the scripts with `--help` for
 the rest.

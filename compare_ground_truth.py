@@ -33,12 +33,24 @@ is matched against bout starts instead:
         --licks <stem>_anticipatory_bouts.csv --detect-time-col start_s \
         --bouts <stem>_lick_bouts.csv
 
-Add --offset-scan if the ground truth may be on a different clock than the video.
+The lab scores video in TDT OpenScope, which saves the marks as a .nxt notes file of
+"Tick @ <seconds> -> <code>" lines. Those times are TDT block time snapped to TDT's 1 s Tick
+events, so a .nxt ground truth is read directly and matched with a 1 s tolerance by default.
+TDT time equals the detector's frame/fps seconds only while the camera runs at exactly the
+nominal rate. The current rig's cameras do (30.000 fps) on all but one session checked, which
+ran at 29.971 fps and drifts about 3.5 s an hour; the 2026 old-rig cameras ran at 15-16 fps with
+different frame counts per camera. Pass --frame-times with each frame's TDT time (one row per
+frame, e.g. from the camera's TDT epoc) and detections are placed on the TDT clock frame by
+frame.
+
+Add --offset-scan if the ground truth may be on a different clock than the video (it finds a
+constant shift only, not a drift).
 """
 
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 
 import numpy as np
@@ -74,6 +86,28 @@ def pick_time_columns(df, time_col=None, end_col=None):
     start = max(starts, key=score)
     end = max(ends, key=score) if ends else None
     return start, end
+
+
+def read_nxt(path):
+    """TDT OpenScope notes: one 'Tick @ <seconds> -> <code>' line per hand-scored mark."""
+    rows = []
+    with open(path, errors="replace") as f:
+        for line in f:
+            m = re.match(r"\s*Tick @ ([\d.]+) -> (\d+)", line)
+            if m:
+                rows.append((float(m.group(1)), int(m.group(2))))
+    return pd.DataFrame(rows, columns=["time_s", "code"])
+
+
+def frame_clock(path):
+    """Frame index -> time (s) from a CSV of per-frame times (a time_s column, or the last
+    column), extended linearly past the last listed frame."""
+    t = pd.read_csv(path)
+    t = (t["time_s"] if "time_s" in t.columns else t.iloc[:, -1]).to_numpy(float)
+    step = float(np.median(np.diff(t)))
+    return lambda frames: np.where(np.asarray(frames) < len(t),
+                                   t[np.minimum(np.asarray(frames, int), len(t) - 1)],
+                                   t[-1] + (np.asarray(frames) - (len(t) - 1)) * step)
 
 
 def detect_units(values, duration_s, n_frames, forced="auto"):
@@ -144,7 +178,8 @@ def overlap_match(gt_periods, bouts):
 # --------------------------------------------------------------------------------------
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Score detected anticipatory licks vs hand scoring.")
-    ap.add_argument("ground_truth", help="hand-scored CSV of anticipatory lick timestamps")
+    ap.add_argument("ground_truth", help="hand-scored CSV of anticipatory lick timestamps, or a "
+                                         "TDT OpenScope .nxt notes file")
     ap.add_argument("--licks", required=True, help="<stem>_anticipatory_licks.csv")
     ap.add_argument("--bouts", default=None,
                     help="<stem>_lick_bouts.csv (enables the misclassified-vs-missed diagnostic)")
@@ -157,8 +192,13 @@ def main(argv=None):
                     help="which detected timestamp to match on (default: protrusion onset). Use "
                          "start_s with --licks <stem>_anticipatory_bouts.csv when the hand scoring "
                          "marks where licking starts (a single lick or a bout) rather than every lick")
-    ap.add_argument("--match-tolerance", type=float, default=0.25,
-                    help="seconds; a hand score within this of a detection counts as matched")
+    ap.add_argument("--frame-times", default=None,
+                    help="CSV of each frame's time on the hand-scoring clock (a time_s column, one "
+                         "row per frame, e.g. the camera's TDT epoc); detections are then timed by "
+                         "frame instead of by the detector's frame/fps seconds")
+    ap.add_argument("--match-tolerance", type=float, default=None,
+                    help="seconds; a hand score within this of a detection counts as matched "
+                         "(default 0.25, or 1.0 for a .nxt file, whose marks snap to 1 s ticks)")
     ap.add_argument("--offset-scan", action="store_true",
                     help="search for the clock offset that maximises matches")
     ap.add_argument("--offset-range", type=float, default=5.0, help="seconds, +/-")
@@ -166,13 +206,23 @@ def main(argv=None):
     ap.add_argument("--out", default=None, help="write per-hand-score match results to this CSV")
     args = ap.parse_args(argv)
 
+    nxt = args.ground_truth.lower().endswith(".nxt")
+    if args.match_tolerance is None:
+        args.match_tolerance = 1.0 if nxt else 0.25
+
     det_df = pd.read_csv(args.licks)
     if args.detect_time_col not in det_df.columns:
         raise SystemExit(f"{args.licks} has no {args.detect_time_col}; "
                          f"columns={list(det_df.columns)}")
+    bouts = pd.read_csv(args.bouts) if args.bouts else None
+    if args.frame_times:
+        clock = frame_clock(args.frame_times)
+        frame_col = {"onset_s": "onset_frame", "peak_s": "peak_frame", "start_s": "start_frame"}
+        det_df[args.detect_time_col] = clock(det_df[frame_col[args.detect_time_col]])
+        if bouts is not None and len(bouts):
+            bouts["start_s"], bouts["end_s"] = clock(bouts["start_frame"]), clock(bouts["end_frame"])
     det = np.sort(det_df[args.detect_time_col].to_numpy(float))
 
-    bouts = pd.read_csv(args.bouts) if args.bouts else None
     if bouts is not None and len(bouts):
         duration_s = float(bouts["end_s"].max())
         n_frames = int(bouts["end_frame"].max())
@@ -180,12 +230,18 @@ def main(argv=None):
         duration_s = float(det.max()) if len(det) else 1.0
         n_frames = int(duration_s * args.fps)
 
-    gt_df = pd.read_csv(args.ground_truth)
-    scol, ecol = pick_time_columns(gt_df, args.gt_time_col, args.gt_end_col)
-    unit, k = detect_units(gt_df[scol], duration_s, n_frames, args.gt_units)
-    if unit == "frames":
-        k = 1.0 / args.fps
+    if nxt:
+        gt_df = read_nxt(args.ground_truth)
+        scol, ecol, unit, k = "time_s", None, "s (TDT notes)", 1.0
+    else:
+        gt_df = pd.read_csv(args.ground_truth)
+        scol, ecol = pick_time_columns(gt_df, args.gt_time_col, args.gt_end_col)
+        unit, k = detect_units(gt_df[scol], duration_s, n_frames, args.gt_units)
+        if unit == "frames":
+            k = 1.0 / args.fps
     gt = gt_df[scol].to_numpy(float) * k
+    if not len(gt):
+        raise SystemExit(f"{args.ground_truth} holds no hand-scored marks")
     print(f"ground truth : {args.ground_truth}")
     print(f"  time column : {scol!r}" + (f" (+ end {ecol!r})" if ecol else ""))
     print(f"  units       : {unit}  ->  range {gt.min():.2f}-{gt.max():.2f}s "

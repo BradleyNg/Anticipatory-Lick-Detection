@@ -183,9 +183,9 @@ and 640x400) and all at sixty frames per second, so run with `--fps 60`.
 |---|---|---|---|
 | extensions found, then accepted | 15, 14 | 18, 13 | 10, 10 |
 | accepted trial length | 2.98 to 3.07s | 2.97 to 3.03s | 3.00 to 3.03s |
-| anticipatory licks | 129 | 20 | 721 |
+| anticipatory licks | 158 | 32 | 739 |
 | in a run leading into a reward | 111 | 2 | 35 |
-| lone single licks between trials | 18 | 14 | 309 |
+| lone single licks between trials | 29 | 23 | 317 |
 
 The check worth trusting is the spout itself. Across all three sessions it sits at the learned
 reward position on **100 percent** of the frames inside an accepted trial, and back at rest on
@@ -193,10 +193,12 @@ reward position on **100 percent** of the frames inside an accepted trial, and b
 seconds everywhere, which is the rig repeating one fixed action: the logs program a 3.00 s
 extension.
 
-These numbers start each trial when the spout leaves rest (see "When a trial starts" below). With
-`--extension-onset arrival`, the original behaviour, the same sessions give 134, 23 and 730
+These numbers come from the default settings: each trial starts when the spout leaves rest (see
+"When a trial starts" below), and licking right after a retraction counts as anticipatory. With
+`--extension-onset arrival`, the original trial start, the same sessions give 163, 35 and 748
 anticipatory licks and trial lengths of 2.87 to 2.98 s, short by the time the spout takes to
-travel.
+travel. With `--post-reward-s 2`, which sets aside the 2 s after each retraction as reward
+clean-up, they give 129, 20 and 721.
 
 ## When a trial starts
 
@@ -220,8 +222,8 @@ share a bout, how far back a lead-in can reach, and so on) are durations underne
 converted at whatever `--fps` is given. At 60 fps that reproduces the original values exactly. At
 30 fps the shortest licks show the tongue for a single frame, and a fixed two-frame minimum threw
 away close to half of them on one 30 fps session, against the rig's touch sensor. The default
-is 30 fps; pass `--fps` for any recording at another rate. Any frame-count option given explicitly on the
-command line still wins.
+is 30 fps; pass `--fps` for any recording at another rate. Any frame-count option given
+explicitly on the command line still wins.
 
 The three sessions behave very differently, and that is real rather than a fault. M13 hardly
 licks at all except when reward is there. M15 is a progressive ratio session, so its rewards
@@ -256,11 +258,10 @@ the suite still runs on a fresh clone.
 Rewards sometimes arrive close together, the spout retracting and going straight back out a few
 seconds later. Licking in a gap like that is anticipating the reward about to arrive, not
 finishing the one just given, so when the clean-up window is switched on (`--post-reward-s`
-above 0) it must not be allowed to eat it. Two things
-prevent that. Licking that runs into the next extension is flagged as a lead-in and outranks the
-clean-up carve, and the carve is separately capped at `--post-reward-max-frac` of the distance to
-the next reward, which covers the case where the lead-in reach is set shorter than the clean-up
-window.
+above 0) it must not be allowed to eat it. Two things prevent that. Licking that runs into the
+next extension is flagged as a lead-in and outranks the clean-up carve, and the carve is
+separately capped at `--post-reward-max-frac` of the distance to the next reward, which covers
+the case where the lead-in reach is set shorter than the clean-up window.
 
 Worth knowing that a long parked stretch at the head of a recording is not a reward, so the gap
 after it is not clean-up either and licking there counts as anticipatory in full.
@@ -268,9 +269,9 @@ after it is not clean-up either and licking there counts as anticipatory in full
 ## Tuning
 
 Set `--fps` to the recording's frame rate (30 is the default); everything counted in frames
-follows it. The settings worth knowing about are `--post-reward-s`,
-which is how long after a retraction counts as finishing the reward rather than anticipating
-the next one (0 by default, so none of it), and `--tongue-score-min`, which is the SLEAP
-confidence needed before a tongue is believed. There is also `--lick-episode-gap`, which only decides where a lead-in run is judged to
-begin and no longer affects which licks are counted. Run any of the scripts with `--help` for
-the rest.
+follows it. The settings worth knowing about are `--post-reward-s`, which is how long after a
+retraction counts as finishing the reward rather than anticipating the next one (0 by default,
+so none of it), and `--tongue-score-min`, which is the SLEAP confidence needed before a tongue
+is believed. There is also `--lick-episode-gap`, which only decides where a lead-in run is
+judged to begin and no longer affects which licks are counted. Run any of the scripts with
+`--help` for the rest.
